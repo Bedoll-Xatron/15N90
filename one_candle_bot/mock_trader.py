@@ -30,7 +30,13 @@ from strategy.filters import check_atr_filter, check_volume_filter, check_market
 from strategy.position_sizer import calc_position_size
 from strategy.pattern import detect_entry_signal as detect_strategy_A, detect_strategy_B, detect_strategy_C
 
-from notify.telegram import send_mock_buy, send_mock_sell, send_daily_report
+from notify.telegram import (
+    send_mock_buy,
+    send_mock_sell,
+    send_daily_report,
+    check_commands,
+    send as send_telegram
+)
 
 from mock_trade.portfolio import Portfolio, Position
 from mock_trade.position_manager import PositionManager
@@ -243,6 +249,23 @@ def _check_strategies(
             _execute_mock_buy("C", ctx, sig_c, portfolios["C"], limit_mgrs["C"], locked_tickers, initial_balances["C"])
 
 
+def _handle_telegram_commands(portfolios: dict, limit_mgrs: dict):
+    """텔레그램에서 수신된 명령어를 처리합니다."""
+    cmds = check_commands()
+    for text in cmds:
+        if text.startswith("/status"):
+            lines = ["🤖 <b>현재 봇 상태 보고</b>"]
+            for s_id, p in portfolios.items():
+                pos_count = len(p.positions)
+                lines.append(f"<b>[전략 {s_id}]</b> 보유: {pos_count}종목 / 잔고: {p.balance:,.0f}원")
+                for t, pos in p.positions.items():
+                    lines.append(f"  - {pos.name}: {pos.direction} {pos.quantity}주 @ {pos.entry_price:,.0f}")
+                lines.append(f"  - 일일 한도 차단: {'✅ 차단됨' if limit_mgrs[s_id].halted else '❌ 해제상태'}")
+            send_telegram("\n".join(lines))
+            
+        elif text.startswith("/test"):
+            send_telegram("✅ 원캔들 봇이 정상적으로 작동 중이며, 명령어를 성공적으로 수신했습니다!")
+
 
 def _get_market_change(client: KISClient) -> tuple[float, float]:
     today = date.today().strftime("%Y%m%d")
@@ -370,6 +393,8 @@ def run_mock_trader(client: KISClient, limit: int):
     # 1. 09:15 ~ 10:30 (신호 감시 + 포지션 청산 감시)
     poll_count = 0
     while _now_str() <= SCAN_END_TIME:
+        _handle_telegram_commands(portfolios, limit_mgrs)
+        
         for pm in pms.values():
             pm.check_positions()
 
@@ -393,6 +418,8 @@ def run_mock_trader(client: KISClient, limit: int):
 
     # 2. 10:30 ~ 14:50 (포지션 청산만 감시)
     while _now_str() <= MARKET_CLOSE_TIME:
+        _handle_telegram_commands(portfolios, limit_mgrs)
+        
         total_positions = sum(len(p.positions) for p in portfolios.values())
         if total_positions == 0:
             break

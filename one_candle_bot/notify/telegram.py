@@ -11,6 +11,9 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+_GET_UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
+
+_last_update_id = 0
 
 
 def _token()   -> str: return os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -36,6 +39,40 @@ def send(text: str) -> bool:
     except Exception as e:
         logger.warning(f"텔레그램 전송 실패: {e}")
         return False
+
+
+def check_commands() -> list[dict]:
+    """텔레그램에서 새로 수신된 메시지를 가져옵니다."""
+    global _last_update_id
+    if not _enabled():
+        return []
+        
+    try:
+        r = requests.get(
+            _GET_UPDATES_URL.format(token=_token()),
+            params={"offset": _last_update_id + 1, "timeout": 1},
+            timeout=5,
+        )
+        data = r.json()
+        if data.get("ok") and data["result"]:
+            updates = data["result"]
+            _last_update_id = updates[-1]["update_id"]
+            
+            # 지정된 CHAT_ID에서 온 텍스트 메시지만 필터링
+            valid_msgs = []
+            target_chat = str(_chat_id())
+            for upd in updates:
+                msg = upd.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "")
+                if chat_id == target_chat and text:
+                    valid_msgs.append(text)
+            return valid_msgs
+            
+        return []
+    except Exception as e:
+        # 타임아웃 등 네트워크 에러는 무시
+        return []
 
 
 def send_signal(
