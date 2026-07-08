@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Project2026\\\\15N90\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName)",
+      "PowerShell(New-Item *)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Project2026\\\\15N90\\\\one_candle_bot\\\\backtest\\\\data\" -Recurse -File | Where-Object { $_.Name -ne \"README.md\" } | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize)",
+      "PowerShell(python -m pip install xlrd -q 2>&1)"
+    ]
+  }
+}

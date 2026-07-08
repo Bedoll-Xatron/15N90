@@ -1,0 +1,164 @@
+"""
+Universe 스크리너
+
+메이저 주식 및 ETF를 대상으로, 현재 20일선 위에 있으면서 
+최근 20거래일 수익률(모멘텀)이 가장 높은 종목들을 선별하여 
+10개 미만의 당일 감시 종목을 선정합니다.
+"""
+import logging
+from datetime import date
+from typing import Dict
+
+from config import UNIVERSE
+from backtest.data_loader import load_stock_ohlcv
+from market.holidays import get_calendar
+
+logger = logging.getLogger(__name__)
+
+# 절대 상폐되지 않을 시총 최상위 우량주 및 대표 ETF 모음
+MAJOR_TICKERS = {
+    # 메이저 KOSPI 우량주
+    "005930": "삼성전자",
+    "000660": "SK하이닉스",
+    "005380": "현대차",
+    "000270": "기아",
+    "068270": "셀트리온",
+    "105560": "KB금융",
+    "005490": "POSCO홀딩스",
+    "035420": "NAVER",
+    "035720": "카카오",
+    "051910": "LG화학",
+    "028260": "삼성물산",
+    "006400": "삼성SDI",
+    "012330": "현대모비스",
+    "066570": "LG전자",
+    "373220": "LG에너지솔루션",
+    "032830": "삼성생명",
+    "003550": "LG",
+    "034730": "SK",
+    "015760": "한국전력",
+    "018260": "삼성SDS",
+    # 메이저 KOSDAQ 우량주
+    "247540": "에코프로비엠",
+    "086520": "에코프로",
+    "022100": "포스코DX",
+    "066970": "엘앤에프",
+    "028300": "HLB",
+    "196170": "알테오젠",
+    # 메이저 시장 지수 ETF (인버스/레버리지 제외 — 단타 세력 패턴 발생 구조 아님)
+    "069500": "KODEX 200",
+    # 메이저 테마/해외 ETF
+    "381170": "TIGER 미국테크TOP10 INDXX",
+    "381180": "TIGER 미국필라델피아반도체나스닥",
+    "133690": "TIGER 미국나스닥100",
+    "305720": "KODEX 2차전지산업",
+    "091160": "KODEX 반도체",
+    "364980": "TIGER KRX2차전지K-뉴딜",
+}
+
+def _get_recent_trading_day() -> str:
+    """가장 최근 영업일 (공휴일·주말 제외)"""
+    return get_calendar().last_trading_day().strftime("%Y%m%d")
+
+class UniverseScreener:
+    """종목 스크리너 (pykrx 기반, KIS API 불필요)"""
+
+    def screen(self, limit: int = 8, client=None) -> Dict[str, str]:
+        """
+        당일 감시 종목 반환 — {종목코드: 종목명}
+        최근 20일 모멘텀 기준 상위 종목 추천 (MA20 이상 우상향 한정)
+        client가 제공되면 당일 아침 실시간 등락률을 반영하여 최종 정렬합니다.
+        """
+        base = MAJOR_TICKERS
+        today_str  = _get_recent_trading_day()
+        # 데이터 캐싱을 활용하므로 안전하게 넉넉히 가져옴
+        start_str  = "20230101"
+
+        logger.info(f"[Universe] 스크리닝 시작 ({today_str}) 후보 {len(base)}종목")
+
+        scored: list[tuple[str, str, float, float]] = []  # (code, name, momentum, trade_amt)
+
+        for code, name in base.items():
+            try:
+                df = load_stock_ohlcv(code, start_str, today_str)
+                if df.empty or len(df) < 21:
+                    continue
+
+                # 최근 21일치 데이터 (오늘 포함)
+                recent_df = df.tail(21)
+                
+                close_prices = recent_df["close"].values
+                current_close = float(close_prices[-1])
+                close_20_days_ago = float(close_prices[0])
+                
+                # MA20 계산 (최근 20일 평균)
+                ma20 = recent_df["close"].tail(20).mean()
+                
+                # 하락 추세(현재가가 20일선 아래)면 탈락
+                if current_close < ma20:
+                    continue
+                
+                # 20일 누적 수익률 (모멘텀)
+                if close_20_days_ago > 0:
+                    momentum = (current_close / close_20_days_ago) - 1.0
+                else:
+                    momentum = 0.0
+                    
+                # 상승세(모멘텀 > 0)가 아니면 탈락
+                if momentum <= 0:
+                    continue
+                
+                # 최근 거래대금
+                last = recent_df.iloc[-1]
+                vol = float(last.get("volume", 0))
+                trade_amt_est = vol * current_close
+                
+                # 유동성 미달 탈락
+                if trade_amt_est < UNIVERSE.min_avg_trade_amount:
+                    continue
+                    
+                scored.append((code, name, momentum, trade_amt_est))
+
+            except Exception as e:
+                logger.debug(f"[Universe] {code} 조회 실패: {e}")
+                continue
+
+        # 모멘텀 내림차순 정렬 후 limit 적용
+        if client is not None:
+            logger.info("[Universe] 당일 아침 실시간 시세(KIS API)를 반영하여 최종 정렬합니다.")
+            realtime_scored = []
+            for code, name, mom, amt in scored:
+                try:
+                    price_data = client.get_stock_price(code)
+                    today_chg = float(price_data.get("prdy_ctrt", "0"))
+                    realtime_scored.append((code, name, mom, amt, today_chg))
+                except Exception as e:
+                    logger.debug(f"실시간 시세 조회 실패 ({code}): {e}")
+                    realtime_scored.append((code, name, mom, amt, 0.0))
+            
+            # 정렬: 1순위 당일등락률, 2순위 20일모멘텀
+            realtime_scored.sort(key=lambda x: (x[4], x[2]), reverse=True)
+            selected = realtime_scored[:limit]
+            
+            logger.info(f"[Universe] 완료: 우상향 {len(scored)}종목 → 당일 주도주 상위 {len(selected)}종목 선정")
+            for i, (code, name, mom, amt, today_chg) in enumerate(selected, 1):
+                logger.info(
+                    f"  {i:>2}. [{code}] {name:<20} "
+                    f"당일상승 {today_chg:>+6.2f}% (20일수익 {mom*100:>+6.2f}%)"
+                )
+            return {code: name for code, name, _, _, _ in selected}
+            
+        else:
+            scored.sort(key=lambda x: x[2], reverse=True)
+            selected = scored[:limit]
+
+            logger.info(
+                f"[Universe] 완료: 우상향 {len(scored)}종목 → 상위 {len(selected)}종목 선정"
+            )
+            for i, (code, name, mom, amt) in enumerate(selected, 1):
+                logger.info(
+                    f"  {i:>2}. [{code}] {name:<20} "
+                    f"20일수익률 {mom*100:>+6.2f}%  거래대금추정 {amt/1e8:>6,.0f}억"
+                )
+
+            return {code: name for code, name, _, _ in selected}

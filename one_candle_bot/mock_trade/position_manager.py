@@ -1,0 +1,64 @@
+import logging
+from typing import Callable
+
+from .portfolio import Portfolio
+from market.api_client import KISClient
+
+logger = logging.getLogger(__name__)
+
+class PositionManager:
+    def __init__(self, portfolio: Portfolio, client: KISClient, on_sell_callback: Callable = None):
+        self.portfolio = portfolio
+        self.client = client
+        self.on_sell_callback = on_sell_callback
+
+    def check_positions(self):
+        """보유 중인 포지션의 현재가를 확인하고 익절/손절 조건에 도달했는지 검사합니다."""
+        tickers = list(self.portfolio.positions.keys())
+        if not tickers:
+            return
+
+        for ticker in tickers:
+            pos = self.portfolio.positions[ticker]
+            try:
+                price_info = self.client.get_stock_price(ticker)
+                current_price_str = price_info.get("stck_prpr", "0")
+                current_price = float(current_price_str)
+                if current_price <= 0:
+                    continue
+                    
+                reason = None
+                if pos.direction == 'LONG':
+                    if current_price <= pos.stop_loss:
+                        reason = "손절 (Stop Loss)"
+                    elif current_price >= pos.take_profit:
+                        reason = "익절 (Take Profit)"
+                else: # SHORT
+                    if current_price >= pos.stop_loss:
+                        reason = "손절 (Stop Loss)"
+                    elif current_price <= pos.take_profit:
+                        reason = "익절 (Take Profit)"
+                        
+                if reason:
+                    pnl = self.portfolio.sell(ticker, current_price, reason)
+                    if self.on_sell_callback and pnl is not None:
+                        self.on_sell_callback(pos, current_price, pnl, reason)
+
+            except Exception as e:
+                logger.error(f"[{ticker}] 포지션 가격 확인 실패: {e}")
+
+    def force_close_all(self, reason: str = "장 마감 (Time Exit)"):
+        """모든 포지션을 현재가로 강제 청산합니다."""
+        tickers = list(self.portfolio.positions.keys())
+        for ticker in tickers:
+            pos = self.portfolio.positions[ticker]
+            try:
+                price_info = self.client.get_stock_price(ticker)
+                current_price_str = price_info.get("stck_prpr", "0")
+                current_price = float(current_price_str)
+                if current_price > 0:
+                    pnl = self.portfolio.sell(ticker, current_price, reason)
+                    if self.on_sell_callback and pnl is not None:
+                        self.on_sell_callback(pos, current_price, pnl, reason)
+            except Exception as e:
+                logger.error(f"[{ticker}] 포지션 강제 청산 실패: {e}")
