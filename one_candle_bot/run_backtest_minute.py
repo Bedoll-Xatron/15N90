@@ -43,9 +43,10 @@ def main() -> None:
 
         print(f"\n[{name}({ticker})] CSV 파일 {len(dates)}일치 발견 ({dates[0]}~{dates[-1]})")
         ohlcv  = load_stock_ohlcv(ticker, START, END)
-        trades = simulate_minute_stock(ticker, ohlcv, market, BacktestParams(), EQUITY)
-        all_trades.extend(trades)
-        print(f"  신호 {len(trades)}건")
+        trades_dict = simulate_minute_stock(ticker, ohlcv, market, BacktestParams(), EQUITY)
+        for strat_id, t_list in trades_dict.items():
+            all_trades.extend(t_list)
+        print(f"  신호 {sum(len(t) for t in trades_dict.values())}건")
 
     if not all_trades:
         print("\n분봉 CSV 파일이 없어 백테스트를 실행할 수 없습니다.")

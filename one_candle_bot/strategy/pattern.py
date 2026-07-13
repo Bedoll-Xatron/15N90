@@ -233,6 +233,15 @@ def _check_long_pattern(
     box: BoxRange,
 ) -> Optional[EntrySignal]:
     """하방 이탈 후 Long 반전 패턴 검색 (망치형 우선, 이후 장악형)"""
+    from config import STRATEGY
+    
+    # [유튜브 거래량 급감 필터] 하방 이탈/휩소 발생 시 투매(대량 거래)가 아닌지 확인
+    # 수정: 반등하는 현재봉(curr)이 아니라, 박스를 깨고 내려가던 직전봉(prev)의 거래량이 씨가 말랐는지 검사
+    if box.volume > 0 and prev is not None:
+        avg_box_5m_vol = box.volume / 3.0
+        # 직전 하락봉의 거래량이 허용치보다 많으면 진짜 하락(투매)일 수 있으므로 진입 포기
+        if prev.volume > avg_box_5m_vol * STRATEGY.pullback_volume_ratio:
+            return None
 
     # ── 망치형 ──
     if is_hammer(curr):
@@ -277,6 +286,14 @@ def _check_short_pattern(
     box: BoxRange,
 ) -> Optional[EntrySignal]:
     """상방 이탈 후 Short 반전 패턴 검색 (역망치형 우선, 이후 장악형)"""
+    from config import STRATEGY
+
+    # [유튜브 거래량 급감 필터] 휩소 발생 시 대량 거래가 실린 찐돌파가 아닌지 확인
+    # 수정: 꺾이는 현재봉(curr)이 아니라, 박스를 뚫고 올라가던 직전봉(prev)의 거래량이 적었는지 검사
+    if box.volume > 0 and prev is not None:
+        avg_box_5m_vol = box.volume / 3.0
+        if prev.volume > avg_box_5m_vol * STRATEGY.pullback_volume_ratio:
+            return None
 
     # ── 역망치형 ──
     if is_shooting_star(curr):
@@ -372,6 +389,14 @@ def detect_strategy_C(
         lower_bound = box.high * (1 - 0.010)  # 1.0% 아래까지 허용
         upper_bound = box.high * (1 + 0.005)  # 0.5% 위까지 허용
         if lower_bound <= curr.low <= upper_bound and curr.close > box.high:
+            from config import STRATEGY
+            
+            # [유튜브 거래량 급감 필터] 눌림목 하락 시 거래량이 씨가 말랐는지 확인
+            if box.volume > 0:
+                avg_box_5m_vol = box.volume / 3.0
+                if curr.volume > avg_box_5m_vol * STRATEGY.pullback_volume_ratio:
+                    return None
+                    
             trigger = curr.close
             stop = _long_stop(box.high * 0.995) # 박스 상단 0.5% 아래
             tp = trigger + (trigger - stop) * 3.0 # 손익비 3배

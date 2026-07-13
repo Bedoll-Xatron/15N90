@@ -28,21 +28,43 @@ class PositionManager:
                     continue
                     
                 reason = None
+                is_partial = False
+                
                 if pos.direction == 'LONG':
+                    rr2_price = pos.entry_price + (pos.entry_price - pos.stop_loss) * 2.0
+                    
                     if current_price <= pos.stop_loss:
                         reason = "손절 (Stop Loss)"
+                    elif not pos.partial_sold and current_price >= rr2_price:
+                        reason = "부분 익절 (RR 2.0 도달)"
+                        is_partial = True
                     elif current_price >= pos.take_profit:
-                        reason = "익절 (Take Profit)"
+                        reason = "최종 익절 (Take Profit)"
                 else: # SHORT
+                    rr2_price = pos.entry_price - (pos.stop_loss - pos.entry_price) * 2.0
+                    
                     if current_price >= pos.stop_loss:
                         reason = "손절 (Stop Loss)"
+                    elif not pos.partial_sold and current_price <= rr2_price:
+                        reason = "부분 익절 (RR 2.0 도달)"
+                        is_partial = True
                     elif current_price <= pos.take_profit:
-                        reason = "익절 (Take Profit)"
+                        reason = "최종 익절 (Take Profit)"
                         
                 if reason:
-                    pnl = self.portfolio.sell(ticker, current_price, reason)
-                    if self.on_sell_callback and pnl is not None:
-                        self.on_sell_callback(pos, current_price, pnl, reason)
+                    if is_partial:
+                        sell_qty = pos.quantity // 2
+                        if sell_qty > 0:
+                            pnl = self.portfolio.sell(ticker, current_price, reason, sell_qty=sell_qty)
+                            if self.on_sell_callback and pnl is not None:
+                                self.on_sell_callback(pos, current_price, pnl, reason)
+                            # 본절 컷 상향/하향
+                            pos.stop_loss = pos.entry_price
+                            self.portfolio.save()
+                    else:
+                        pnl = self.portfolio.sell(ticker, current_price, reason)
+                        if self.on_sell_callback and pnl is not None:
+                            self.on_sell_callback(pos, current_price, pnl, reason)
 
             except Exception as e:
                 logger.error(f"[{ticker}] 포지션 가격 확인 실패: {e}")

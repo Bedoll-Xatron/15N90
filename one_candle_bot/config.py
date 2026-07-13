@@ -32,7 +32,7 @@ def load_kis_config() -> KISConfig:
 @dataclass(frozen=True)
 class UniverseConfig:
     min_market_cap: int = 100_000_000_000       # 1,000억 이상
-    min_avg_trade_amount: int = 5_000_000_000   # 50억 이상
+    min_avg_trade_amount: int = 50_000_000_000  # 500억 이상 (주도주 필터 강화)
     max_prev_change_pct: float = 10.0
     min_prev_change_pct: float = -10.0
     top_n_per_market: int = 100                 # 시장별 거래량 순위 상위 N개 후보
@@ -41,11 +41,12 @@ class UniverseConfig:
 @dataclass(frozen=True)
 class StrategyConfig:
     atr_period: int = 14
-    atr_ratio: float = 0.33          # 15분봉 크기 >= ATR * atr_ratio
-    volume_multiplier: float = 1.5   # 15분봉 거래량 >= 일평균 * multiplier
-    hammer_tail_ratio: float = 0.60  # 꼬리 >= 전체 범위 * 비율
-    hammer_body_ratio: float = 0.25  # 몸통 <= 전체 범위 * 비율
-    market_filter_pct: float = 1.0   # KOSPI/KOSDAQ ±1% 기준
+    atr_ratio: float = 0.20          # 0.33 -> 0.20 (박스 크기 조건 유지)
+    box_vol_ratio: float = 0.20      # 첫 15분 박스 거래량이 20일 일평균 거래량의 20% 이상 터져야 함
+    pullback_volume_ratio: float = 0.5 # 눌림목 하락 시 거래량이 절반 이하로 말라야 함
+    hammer_tail_ratio: float = 0.50  # 꼬리 비율 유지
+    hammer_body_ratio: float = 0.35  # 몸통 비율 유지
+    market_filter_pct: float = 1.5   # 코스피/코스닥 방향성 제한 유지
 
 
 UNIVERSE = UniverseConfig()

@@ -37,11 +37,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BacktestParams:
     atr_period: int   = 14
-    atr_ratio: float  = 0.33
-    vol_mult: float   = 1.5
-    hammer_tail: float = 0.60
-    hammer_body: float = 0.25
-    market_pct: float  = 1.0
+    atr_ratio: float  = 0.20
+    box_vol_ratio: float = 0.20
+    hammer_tail: float = 0.50
+    hammer_body: float = 0.35
+    market_pct: float  = 1.5
     risk_pct: float    = 0.01
     max_invest_pct: float = 0.20
 
@@ -189,12 +189,14 @@ def simulate_one_stock(
         if not atr_result.passed:
             continue
 
-        # ── 거래량 필터 ──
+        # ── 거래량 폭발 필터 (근사 백테스트이므로 당일 전체 거래량이 최소 box_vol_ratio 이상이어야 함을 검증) ──
         vol_rows = _daily_to_vol_rows(ohlcv.iloc[max(0, i - 20): i])
         from market.data_processor import calc_avg_daily_volume
         avg_vol = calc_avg_daily_volume(vol_rows, 20)
-        vol_result = check_volume_filter(int(row_today["volume"]), avg_vol, params.vol_mult)
-        if not vol_result.passed:
+        
+        # 실제 분봉에서는 15분만에 20%가 터지는지 확인하지만, 
+        # 일봉 근사 백테스트에서는 당일 거래량 전체가 15분 폭발 목표치(20%)보다 크기만 하면 1차 패스
+        if avg_vol > 0 and int(row_today["volume"]) < avg_vol * params.box_vol_ratio:
             continue
 
         # ── 패턴 감지 ──

@@ -84,7 +84,7 @@ def optimize(
         # 전략별 모든 거래 합산
         all_trades_by_strategy: dict[str, list[Trade]] = {s: [] for s in strategies}
         for ticker, ohlcv in stock_data.items():
-            trade_map = simulate_minute_stock(ohlcv=ohlcv, daily_ohlcv=ohlcv,
+            trade_map = simulate_minute_stock(daily_ohlcv=ohlcv,
                                              market=market_df, ticker=ticker,
                                              params=params, initial_equity=initial_equity)
             for s in strategies:

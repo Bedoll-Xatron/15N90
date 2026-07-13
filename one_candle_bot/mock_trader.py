@@ -47,6 +47,18 @@ DEFAULT_TICKERS = {
     "005930": "삼성전자",
     "000660": "SK하이닉스",
     "068270": "셀트리온",
+    "005380": "현대차",
+    "000270": "기아",
+    "105560": "KB금융",
+    "035420": "NAVER",
+    "035720": "카카오",
+    "051910": "LG화학",
+    "005490": "POSCO홀딩스",
+    "066570": "LG전자",
+    "028260": "삼성물산",
+    "032830": "삼성생명",
+    "012330": "현대모비스",
+    "373220": "LG에너지솔루션",
 }
 
 PARAMS = BacktestParams()
@@ -63,6 +75,7 @@ class StockContext:
         self.atr:         float          = 0.0
         self.avg_vol:     float          = 0.0
         self.box:         BoxRange | None = None
+        self.box_rejected: bool = False
         self.signaled_A:  bool = False
         self.signaled_B:  bool = False
         self.signaled_C:  bool = False
@@ -108,12 +121,15 @@ def _setup_box(ctx: StockContext, client: KISClient) -> bool:
 
     atr_r = check_atr_filter(box.size, ctx.atr, PARAMS.atr_ratio)
     if not atr_r.passed:
+        ctx.box_rejected = True
         return False
 
-    vol_r = check_volume_filter(first15.volume, ctx.avg_vol / 26, PARAMS.vol_mult)
-    if not vol_r.passed:
+    # ── 거래량 폭발 필터 (15분만에 일평균 거래량의 box_vol_ratio 터졌는지 확인) ──
+    from config import STRATEGY
+    if ctx.avg_vol > 0 and first15.volume < ctx.avg_vol * STRATEGY.box_vol_ratio:
+        ctx.box_rejected = True
         return False
-
+        
     ctx.box = box
     logger.info(f"[{ctx.ticker}] 박스 확정 H:{box.high:,} L:{box.low:,} ATR비율:{box.size/ctx.atr:.1%}")
     return True
@@ -285,15 +301,45 @@ def _get_market_change(client: KISClient) -> tuple[float, float]:
     except Exception:
         return 0.0, 0.0
 
+def _check_market_ema21(client: KISClient) -> bool:
+    """코스피(KODEX 200)의 일봉 21 EMA가 상승 추세(V자 우측)인지 확인"""
+    today = date.today().strftime("%Y%m%d")
+    try:
+        from backtest.data_loader import load_stock_ohlcv
+        # KODEX 200 (069500)
+        df = load_stock_ohlcv("069500", "20230101", today)
+        if df.empty or len(df) < 22:
+            return True # 데이터 부족 시 제한 안함
+            
+        df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
+        recent = df.tail(2)
+        
+        is_rising = float(recent["ema21"].iloc[-1]) > float(recent["ema21"].iloc[-2])
+        is_above = float(recent["close"].iloc[-1]) >= float(recent["ema21"].iloc[-1])
+        
+        return is_rising and is_above
+    except Exception as e:
+        logger.warning(f"시장 21 EMA 확인 실패: {e}")
+        return True
+
 
 def _now_str() -> str:
     return datetime.now().strftime("%H%M%S")
 
-def _wait_until(target: str, label: str) -> None:
+def _wait_until(target: str, label: str, portfolios: dict = None, limit_mgrs: dict = None) -> None:
+    import time
+    last_log = 0
     while _now_str() < target:
         remaining = _seconds_until(target)
-        logger.info(f"{label} 대기 중... {remaining//60}분 {remaining%60}초 남음")
-        time.sleep(min(60, remaining))
+        now_ts = time.time()
+        if now_ts - last_log >= 60:
+            logger.info(f"{label} 대기 중... {remaining//60}분 {remaining%60}초 남음")
+            last_log = now_ts
+            
+        if portfolios and limit_mgrs:
+            _handle_telegram_commands(portfolios, limit_mgrs)
+            
+        time.sleep(min(5, remaining))
     logger.info(f"{label} 도달")
 
 def _seconds_until(target_hhmm: str) -> int:
@@ -333,11 +379,20 @@ def run_mock_trader(client: KISClient, limit: int):
         "C": {"balance": portfolios["C"].balance, "pnl_today": 0.0, "trades_count": 0},
     }
 
-    # 포지션 사이징 기준: 당일 시작 총 자본 고정 (현금 잔고와 무관하게 일정한 리스크 계산)
+    # 코스피 21 EMA 추세 확인 (하락장 리스크 관리)
+    market_ema21_ok = _check_market_ema21(client)
+    if not market_ema21_ok:
+        logger.warning("🚨 [지수 리스크 필터] 코스피 지수가 21일 EMA 하락 추세(V자 좌측)입니다. 진입 비중(리스크 한도)을 절반으로 축소합니다.")
+        risk_multiplier = 0.5
+    else:
+        logger.info("✅ [지수 리스크 필터] 코스피 지수가 21일 EMA 상승 추세(V자 우측)입니다. 정상 비중으로 진입합니다.")
+        risk_multiplier = 1.0
+
+    # 포지션 사이징 기준: 당일 시작 총 자본 고정 * risk_multiplier (하락장이면 절반)
     initial_balances = {
-        "A": portfolios["A"].balance,
-        "B": portfolios["B"].balance,
-        "C": portfolios["C"].balance,
+        "A": portfolios["A"].balance * risk_multiplier,
+        "B": portfolios["B"].balance * risk_multiplier,
+        "C": portfolios["C"].balance * risk_multiplier,
     }
 
     # 일일 손실 한도 매니저 (초기 잔고의 -2% 도달 시 신규 진입 차단)
@@ -372,7 +427,7 @@ def run_mock_trader(client: KISClient, limit: int):
         "C": PositionManager(portfolios["C"], client, on_sell_callback=make_on_sell("C")),
     }
 
-    _wait_until(BOX_CLOSE_TIME, "첫 15분봉 마감")
+    _wait_until(BOX_CLOSE_TIME, "첫 15분봉 마감", portfolios, limit_mgrs)
 
     # 09:15 직후 실시간 주도주 유니버스 추출
     tickers = _build_universe(client, limit)
@@ -387,8 +442,12 @@ def run_mock_trader(client: KISClient, limit: int):
     kospi, kosdaq = _get_market_change(client)
     logger.info(f"초기 시장 방향 KOSPI {kospi:+.2f}% KOSDAQ {kosdaq:+.2f}%")
 
-    active = [ctx for ctx in ctxs if _setup_box(ctx, client)]
-    logger.info(f"박스 확정: {len(active)}종목 감시 시작")
+    active = ctxs
+    for ctx in active:
+        _setup_box(ctx, client)
+    
+    confirmed = len([c for c in active if c.box is not None])
+    logger.info(f"박스 확정: {confirmed}종목 감시 시작 (실패 시 계속 재시도)")
 
     # 1. 09:15 ~ 10:30 (신호 감시 + 포지션 청산 감시)
     poll_count = 0
@@ -405,6 +464,15 @@ def run_mock_trader(client: KISClient, limit: int):
             logger.debug(f"[시장 방향 갱신] KOSPI {kospi:+.2f}% KOSDAQ {kosdaq:+.2f}%")
 
         for ctx in active:
+            if ctx.box_rejected:
+                continue
+            
+            if ctx.box is None:
+                if not _setup_box(ctx, client):
+                    continue
+                else:
+                    logger.info(f"[{ctx.ticker}] 지연된 박스 확정 성공! 감시 합류")
+
             _check_strategies(ctx, client, kospi, kosdaq, portfolios, limit_mgrs, locked_tickers, initial_balances)
 
         # 모든 전략이 일일 한도 초과 시 신호 감시 조기 종료
@@ -447,7 +515,7 @@ def run_mock_trader(client: KISClient, limit: int):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="원캔들 모의투자 봇 (A/B/C)")
-    parser.add_argument("--limit", type=int, default=8, help="Universe 최대 종목 수")
+    parser.add_argument("--limit", type=int, default=15, help="Universe 최대 종목 수")
     args = parser.parse_args()
 
     try:

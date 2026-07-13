@@ -50,27 +50,64 @@ def _simulate_minute_exit(
 ) -> tuple[float, str]:
     """
     신호 이후 1분봉으로 익절/손절 시뮬레이션.
-    - 손절 우선 (same bar 동시 도달)
+    - 손익비 2.0(RR 2) 도달 시 50% 익절 후 손절가를 본전으로 상향 (트레일링 스탑)
+    - 손절 우선 (same bar 동시 도달 시 보수적 평가)
     - FORCE_CLOSE 시각 도달 시 현재가로 청산
     """
+    partial_sold = False
+    
+    if direction == "LONG":
+        rr2_price = entry + (entry - stop) * 2.0
+    else:
+        rr2_price = entry - (stop - entry) * 2.0
+
     for c in candles_after:
         if c.time >= FORCE_CLOSE:
-            return c.close, "CLOSE"
+            if not partial_sold:
+                return c.close, "CLOSE"
+            else:
+                return (rr2_price + c.close) / 2.0, "PARTIAL_CLOSE"
 
         if direction == "LONG":
-            if c.low  <= stop:
-                return stop, "SL"
+            if c.low <= stop:
+                if not partial_sold:
+                    return stop, "SL"
+                else:
+                    return (rr2_price + stop) / 2.0, "PARTIAL_SL"
+                    
+            if not partial_sold and c.high >= rr2_price:
+                partial_sold = True
+                stop = entry  # 손절선 본전 상향
+                
             if c.high >= tp:
-                return tp, "TP"
+                if not partial_sold:
+                    return tp, "TP" # 갭상승 등으로 한 번에 도달 시
+                else:
+                    return (rr2_price + tp) / 2.0, "PARTIAL_TP"
         else:
             if c.high >= stop:
-                return stop, "SL"
-            if c.low  <= tp:
-                return tp, "TP"
+                if not partial_sold:
+                    return stop, "SL"
+                else:
+                    return (rr2_price + stop) / 2.0, "PARTIAL_SL"
+                    
+            if not partial_sold and c.low <= rr2_price:
+                partial_sold = True
+                stop = entry  # 손절선 본전 하향
+                
+            if c.low <= tp:
+                if not partial_sold:
+                    return tp, "TP"
+                else:
+                    return (rr2_price + tp) / 2.0, "PARTIAL_TP"
 
-    # 장 마감까지 미체결 → 마지막 캔들 종가
+    # 장 마감까지 미체결
     if candles_after:
-        return candles_after[-1].close, "CLOSE"
+        if not partial_sold:
+            return candles_after[-1].close, "CLOSE"
+        else:
+            return (rr2_price + candles_after[-1].close) / 2.0, "PARTIAL_CLOSE"
+            
     return entry, "CLOSE"
 
 
@@ -107,9 +144,12 @@ def simulate_minute_stock(
     daily_idx = {d.strftime("%Y%m%d"): i for i, d in enumerate(daily_ohlcv.index)}
 
     # 전략별 신호 감지 함수 맵
+    # 일봉 21 EMA 계산 (종목)
+    daily_ohlcv["ema21"] = daily_ohlcv["close"].ewm(span=21, adjust=False).mean()
+
     STRATEGY_DETECTORS = {
         "A": lambda curr, prev, five_min, box: detect_entry_signal(curr, prev, box),
-        "B": lambda curr, prev, five_min, box: detect_strategy_B(curr, prev, box),
+        "B": lambda curr, জ্ঞprev, five_min, box: detect_strategy_B(curr, prev, box),
         "C": lambda curr, prev, five_min, box: detect_strategy_C(five_min, box),
     }
 
@@ -142,12 +182,21 @@ def simulate_minute_stock(
         if not check_atr_filter(box.size, atr, params.atr_ratio).passed:
             continue
 
-        # ── 거래량 필터 (15분봉 거래량 vs 일평균의 10%) ──
+        # ── 거래량 폭발 필터 (15분봉 거래량이 일평균의 box_vol_ratio 이상) ──
         vol_rows  = _daily_to_vol_rows(daily_ohlcv.iloc[max(0, i - 20): i])
         avg_daily = calc_avg_daily_volume(vol_rows, 20)
-        avg_15m   = avg_daily * 0.10   # 수정: /26 → 하루의 10% 기준
-        if not check_volume_filter(first_15m.volume, avg_15m, params.vol_mult).passed:
+        
+        if avg_daily > 0 and first_15m.volume < avg_daily * params.box_vol_ratio:
             continue
+
+        # ── 종목 21 EMA 필터 ──
+        if i >= 2:
+            ema21_current = float(daily_ohlcv["ema21"].iloc[i-1]) # 어제 종가 기준
+            ema21_prev = float(daily_ohlcv["ema21"].iloc[i-2])
+            current_close = float(daily_ohlcv["close"].iloc[i-1])
+            # V자 우측 (EMA 상승) 및 가격이 EMA 위인지 확인
+            if ema21_current <= ema21_prev or current_close < ema21_current:
+                continue
 
         # ── 시장 방향 필터 ──
         sig_ts = daily_ohlcv.index[i]
@@ -157,6 +206,22 @@ def simulate_minute_stock(
         mkt_dir = check_market_direction(kospi, kosdaq, params.market_pct)
         if not mkt_dir.any_allowed:
             continue
+
+        # ── 지수 리스크 필터 (코스피 21 EMA) ──
+        risk_multiplier = 1.0
+        if not mkt.empty and i >= 2:
+            try:
+                # mkt 데이터프레임의 이전 날짜 인덱스를 찾아서 EMA 추세 계산 (mkt는 이미 market에서 로드됨)
+                # market_df 전체에서 해당 날짜 이전 데이터를 가져와야 함.
+                idx_in_market = market.index.get_loc(sig_ts)
+                if isinstance(idx_in_market, int) and idx_in_market >= 2:
+                    k_ema21_curr = float(market["kospi_ema21"].iloc[idx_in_market-1])
+                    k_ema21_prev = float(market["kospi_ema21"].iloc[idx_in_market-2])
+                    k_close = float(market["kospi_close"].iloc[idx_in_market-1])
+                    if k_ema21_curr <= k_ema21_prev or k_close < k_ema21_curr:
+                        risk_multiplier = 0.5
+            except Exception as e:
+                pass
 
         # ── 5분봉 집계 (09:15 ~ 10:30) ──
         trading_candles = [c for c in minute_candles if "091500" <= c.time <= ENTRY_END]
@@ -184,7 +249,7 @@ def simulate_minute_stock(
                 # ── 포지션 사이즈 ──
                 try:
                     pos = calc_position_size(
-                        equity=equity[s_id],
+                        equity=equity[s_id] * risk_multiplier,
                         entry_price=sig.trigger_price,
                         stop_loss=sig.stop_loss,
                         take_profit=sig.take_profit,

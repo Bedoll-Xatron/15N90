@@ -60,22 +60,32 @@ class KISClient:
         return self._access_token  # type: ignore[return-value]
 
     def _refresh_token(self) -> None:
-        logger.info("KIS 토큰 발급 중...")
-        resp = requests.post(
-            f"{self._cfg.base_url}/oauth2/tokenP",
-            json={
-                "grant_type": "client_credentials",
-                "appkey": self._cfg.app_key,
-                "appsecret": self._cfg.app_secret,
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._access_token = data["access_token"]
-        self._token_expires_at = datetime.now() + timedelta(seconds=int(data["expires_in"]))
-        self._save_token_cache()
-        logger.info(f"토큰 발급 완료 (만료: {self._token_expires_at:%Y-%m-%d %H:%M})")
+        last_exc = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(f"KIS 토큰 발급 중... (시도 {attempt}/{MAX_RETRIES})")
+                resp = requests.post(
+                    f"{self._cfg.base_url}/oauth2/tokenP",
+                    json={
+                        "grant_type": "client_credentials",
+                        "appkey": self._cfg.app_key,
+                        "appsecret": self._cfg.app_secret,
+                    },
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                self._access_token = data["access_token"]
+                self._token_expires_at = datetime.now() + timedelta(seconds=int(data["expires_in"]))
+                self._save_token_cache()
+                logger.info(f"토큰 발급 완료 (만료: {self._token_expires_at:%Y-%m-%d %H:%M})")
+                return
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES:
+                    time.sleep(attempt * 2)  # 2초, 4초 대기
+        
+        raise RuntimeError(f"KIS 토큰 발급 실패: {last_exc}") from last_exc
 
     # ------------------------------------------------------------------ #
     #  공통 GET                                                            #

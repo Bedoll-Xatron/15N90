@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class BoxRange:
     high: float
     low: float
+    volume: int = 0
 
     @property
     def size(self) -> float:
@@ -189,7 +190,7 @@ def aggregate_candles(candles: list[Candle], interval_min: int) -> list[Candle]:
 
 def candle_to_box(candle: Candle) -> BoxRange:
     """Candle → BoxRange 변환"""
-    return BoxRange(high=candle.high, low=candle.low)
+    return BoxRange(high=candle.high, low=candle.low, volume=candle.volume)
 
 
 # ------------------------------------------------------------------ #

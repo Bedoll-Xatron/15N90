@@ -82,10 +82,15 @@ def load_market_proxy(start: str, end: str) -> pd.DataFrame:
     logger.info(f"pykrx 시장 프록시 다운로드 {start}~{end}")
     k200  = load_stock_ohlcv(KOSPI_PROXY,  start, end)
     kq150 = load_stock_ohlcv(KOSDAQ_PROXY, start, end)
+    
+    if not k200.empty:
+        k200["ema21"] = k200["close"].ewm(span=21, adjust=False).mean()
 
     df = pd.DataFrame({
         "kospi_chg":  k200["change_pct"]  if not k200.empty  else 0.0,
         "kosdaq_chg": kq150["change_pct"] if not kq150.empty else 0.0,
+        "kospi_close": k200["close"] if not k200.empty else 0.0,
+        "kospi_ema21": k200["ema21"] if not k200.empty else 0.0,
     }).fillna(0.0)
 
     _save_cache(key, df)

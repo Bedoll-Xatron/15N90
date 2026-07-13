@@ -38,6 +38,12 @@ MAJOR_TICKERS = {
     "034730": "SK",
     "015760": "한국전력",
     "018260": "삼성SDS",
+    "042700": "한미반도체",
+    "034020": "두산에너빌리티",
+    "011200": "HMM",
+    "329180": "HD현대중공업",
+    "323410": "카카오뱅크",
+    "259960": "크래프톤",
     # 메이저 KOSDAQ 우량주
     "247540": "에코프로비엠",
     "086520": "에코프로",
@@ -45,6 +51,12 @@ MAJOR_TICKERS = {
     "066970": "엘앤에프",
     "028300": "HLB",
     "196170": "알테오젠",
+    "068760": "셀트리온제약",
+    "348370": "엔켐",
+    "058470": "리노공업",
+    "403870": "HPSP",
+    "035900": "JYP Ent.",
+    "041510": "에스엠",
     # 메이저 시장 지수 ETF (인버스/레버리지 제외 — 단타 세력 패턴 발생 구조 아님)
     "069500": "KODEX 200",
     # 메이저 테마/해외 ETF
@@ -81,40 +93,55 @@ class UniverseScreener:
         for code, name in base.items():
             try:
                 df = load_stock_ohlcv(code, start_str, today_str)
-                if df.empty or len(df) < 21:
+                if df.empty or len(df) < 22:
                     continue
 
+                # 일봉 21 EMA 계산
+                df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
+                
                 # 최근 21일치 데이터 (오늘 포함)
                 recent_df = df.tail(21)
                 
-                close_prices = recent_df["close"].values
-                current_close = float(close_prices[-1])
-                close_20_days_ago = float(close_prices[0])
+                current_close = float(recent_df["close"].iloc[-1])
+                ema21_current = float(recent_df["ema21"].iloc[-1])
+                ema21_prev = float(recent_df["ema21"].iloc[-2])
                 
-                # MA20 계산 (최근 20일 평균)
-                ma20 = recent_df["close"].tail(20).mean()
-                
-                # 하락 추세(현재가가 20일선 아래)면 탈락
-                if current_close < ma20:
+                # [크랙 트레이더의 21 EMA 필터 적용]
+                # 1. 21 EMA가 상승 중이어야 함 (V자의 우측)
+                if ema21_current <= ema21_prev:
+                    continue
+                    
+                # 2. 현재 가격이 21 EMA 위에 있어야 함
+                if current_close < ema21_current:
                     continue
                 
                 # 20일 누적 수익률 (모멘텀)
+                close_20_days_ago = float(recent_df["close"].iloc[0])
                 if close_20_days_ago > 0:
                     momentum = (current_close / close_20_days_ago) - 1.0
                 else:
                     momentum = 0.0
                     
                 # 상승세(모멘텀 > 0)가 아니면 탈락
-                if momentum <= 0:
-                    continue
-                
-                # 최근 거래대금
+                # 최근 거래대금 계산
                 last = recent_df.iloc[-1]
                 vol = float(last.get("volume", 0))
                 trade_amt_est = vol * current_close
                 
-                # 유동성 미달 탈락
-                if trade_amt_est < UNIVERSE.min_avg_trade_amount:
+                # 1. 거래대금 500억 이상 (주도주)
+                is_mega_volume = trade_amt_est >= UNIVERSE.min_avg_trade_amount
+                
+                # 2. 전일 거래량 2배 폭증 (매집봉)
+                prev_19_days_vol = recent_df["volume"].iloc[:-1].mean()
+                last_vol = float(recent_df["volume"].iloc[-1])
+                is_volume_spike = (prev_19_days_vol > 0) and (last_vol >= prev_19_days_vol * 2.0)
+                
+                # [OR 조건] 거래대금이 500억 이상이거나, 전일 거래량이 2배 폭증했으면 통과
+                if not (is_mega_volume or is_volume_spike):
+                    continue
+                    
+                # 안전장치: 아무리 2배가 터졌어도 최소 유동성(100억) 미만인 잡주는 제외
+                if trade_amt_est < 10_000_000_000:
                     continue
                     
                 scored.append((code, name, momentum, trade_amt_est))

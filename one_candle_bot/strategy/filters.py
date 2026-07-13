@@ -80,23 +80,23 @@ def check_atr_filter(
 def check_volume_filter(
     volume_15m: int,
     avg_daily_volume: float,
-    multiplier: float = STRATEGY.volume_multiplier,
+    ratio: float = STRATEGY.box_vol_ratio,
 ) -> FilterResult:
     """
-    15분봉 거래량 >= 일평균 거래량 * multiplier 검증
+    15분봉 거래량 >= 일평균 거래량 * ratio 검증
 
     거래량 폭발이 없으면 세력 개입이 아닌 자연 진동으로 판단.
-    기본 multiplier = 1.5 (150%)
+    기본 ratio = 0.20 (20%)
     """
     if avg_daily_volume <= 0:
         return FilterResult(passed=False, reason="일평균 거래량 데이터 없음")
 
-    threshold = avg_daily_volume * multiplier
+    threshold = avg_daily_volume * ratio
     passed = volume_15m >= threshold
 
     msg = (
         f"15분봉 거래량 {volume_15m:,} / "
-        f"임계 {threshold:,.0f} (평균 {avg_daily_volume:,.0f} × {multiplier})"
+        f"임계 {threshold:,.0f} (평균 {avg_daily_volume:,.0f} × {ratio})"
     )
     logger.debug(f"거래량 필터: {msg} → {'통과' if passed else '탈락'}")
 
