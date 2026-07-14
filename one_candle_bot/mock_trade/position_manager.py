@@ -30,23 +30,26 @@ class PositionManager:
                 reason = None
                 is_partial = False
                 
+                from config import STRATEGY
+                target_rr = getattr(STRATEGY, 'target_rr', 2.0)
+                
                 if pos.direction == 'LONG':
-                    rr2_price = pos.entry_price + (pos.entry_price - pos.stop_loss) * 2.0
+                    rr2_price = pos.entry_price + (pos.entry_price - pos.stop_loss) * target_rr
                     
                     if current_price <= pos.stop_loss:
                         reason = "손절 (Stop Loss)"
                     elif not pos.partial_sold and current_price >= rr2_price:
-                        reason = "부분 익절 (RR 2.0 도달)"
+                        reason = f"부분 익절 (RR {target_rr} 도달)"
                         is_partial = True
                     elif current_price >= pos.take_profit:
                         reason = "최종 익절 (Take Profit)"
                 else: # SHORT
-                    rr2_price = pos.entry_price - (pos.stop_loss - pos.entry_price) * 2.0
+                    rr2_price = pos.entry_price - (pos.stop_loss - pos.entry_price) * target_rr
                     
                     if current_price >= pos.stop_loss:
                         reason = "손절 (Stop Loss)"
                     elif not pos.partial_sold and current_price <= rr2_price:
-                        reason = "부분 익절 (RR 2.0 도달)"
+                        reason = f"부분 익절 (RR {target_rr} 도달)"
                         is_partial = True
                     elif current_price <= pos.take_profit:
                         reason = "최종 익절 (Take Profit)"

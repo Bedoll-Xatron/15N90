@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 from config import load_kis_config
 from market.api_client import KISClient
 from market.universe import UniverseScreener
+from market.news_fetcher import fetch_recent_news
+from ai.analyzer import NIMAnalyzer
+
+# AI 클라이언트 전역 초기화
+ai_analyzer = NIMAnalyzer()
 from market.holidays import get_calendar
 from market.data_processor import (
     BoxRange, aggregate_candles, calc_atr, calc_avg_daily_volume,
@@ -37,6 +42,7 @@ from notify.telegram import (
     check_commands,
     send as send_telegram
 )
+from ai.report_generator import generate_daily_report
 
 from mock_trade.portfolio import Portfolio, Position
 from mock_trade.position_manager import PositionManager
@@ -130,6 +136,17 @@ def _setup_box(ctx: StockContext, client: KISClient) -> bool:
         ctx.box_rejected = True
         return False
         
+    # ── AI 뉴스 검증 (악재 필터링) ──
+    if ai_analyzer.is_available():
+        headlines = fetch_recent_news(ctx.ticker, limit=5)
+        if headlines:
+            # 뉴스가 있을 경우 AI 판별
+            passed = ai_analyzer.analyze_news_catalyst(ctx.ticker, ctx.name, headlines)
+            if not passed:
+                logger.info(f"[{ctx.ticker}] AI 판별 결과 악재 감지로 박스 추적 거부")
+                ctx.box_rejected = True
+                return False
+
     ctx.box = box
     logger.info(f"[{ctx.ticker}] 박스 확정 H:{box.high:,} L:{box.low:,} ATR비율:{box.size/ctx.atr:.1%}")
     return True
@@ -245,24 +262,48 @@ def _check_strategies(
         sig_a = detect_strategy_A(curr, prev, ctx.box)
         if sig_a and mkt_dir.allows(sig_a.direction):
             ctx.signaled_A = True
-            logger.info(f"[{ctx.ticker}] 전략 A 신호 포착")
-            _execute_mock_buy("A", ctx, sig_a, portfolios["A"], limit_mgrs["A"], locked_tickers, initial_balances["A"])
+            
+            # AI 패턴 승인 확인
+            approved = True
+            if ai_analyzer.is_available():
+                ohlcv_text = "\\n".join([f"Time:{c.time} O:{c.open} H:{c.high} L:{c.low} C:{c.close} Vol:{c.volume}" for c in five_min[-5:]])
+                approved = ai_analyzer.validate_pattern_context(ctx.ticker, "A (휩소)", ohlcv_text)
+                
+            if approved:
+                logger.info(f"[{ctx.ticker}] 전략 A 신호 포착 및 AI 승인 완료")
+                _execute_mock_buy("A", ctx, sig_a, portfolios["A"], limit_mgrs["A"], locked_tickers, initial_balances["A"])
 
     # Strategy B
     if not ctx.signaled_B:
         sig_b = detect_strategy_B(curr, prev, ctx.box)
         if sig_b and mkt_dir.allows(sig_b.direction):
             ctx.signaled_B = True
-            logger.info(f"[{ctx.ticker}] 전략 B 신호 포착")
-            _execute_mock_buy("B", ctx, sig_b, portfolios["B"], limit_mgrs["B"], locked_tickers, initial_balances["B"])
+            
+            # AI 패턴 승인 확인
+            approved = True
+            if ai_analyzer.is_available():
+                ohlcv_text = "\\n".join([f"Time:{c.time} O:{c.open} H:{c.high} L:{c.low} C:{c.close} Vol:{c.volume}" for c in five_min[-5:]])
+                approved = ai_analyzer.validate_pattern_context(ctx.ticker, "B (돌파)", ohlcv_text)
+                
+            if approved:
+                logger.info(f"[{ctx.ticker}] 전략 B 신호 포착 및 AI 승인 완료")
+                _execute_mock_buy("B", ctx, sig_b, portfolios["B"], limit_mgrs["B"], locked_tickers, initial_balances["B"])
 
     # Strategy C
     if not ctx.signaled_C:
         sig_c = detect_strategy_C(five_min, ctx.box)
         if sig_c and mkt_dir.allows(sig_c.direction):
             ctx.signaled_C = True
-            logger.info(f"[{ctx.ticker}] 전략 C 신호 포착")
-            _execute_mock_buy("C", ctx, sig_c, portfolios["C"], limit_mgrs["C"], locked_tickers, initial_balances["C"])
+            
+            # AI 패턴 승인 확인
+            approved = True
+            if ai_analyzer.is_available():
+                ohlcv_text = "\\n".join([f"Time:{c.time} O:{c.open} H:{c.high} L:{c.low} C:{c.close} Vol:{c.volume}" for c in five_min[-5:]])
+                approved = ai_analyzer.validate_pattern_context(ctx.ticker, "C (눌림목)", ohlcv_text)
+                
+            if approved:
+                logger.info(f"[{ctx.ticker}] 전략 C 신호 포착 및 AI 승인 완료")
+                _execute_mock_buy("C", ctx, sig_c, portfolios["C"], limit_mgrs["C"], locked_tickers, initial_balances["C"])
 
 
 def _handle_telegram_commands(portfolios: dict, limit_mgrs: dict):
@@ -365,6 +406,28 @@ def _build_universe(client: KISClient, limit: int) -> dict[str, str]:
 def run_mock_trader(client: KISClient, limit: int):
     today = date.today().strftime("%Y%m%d")
     logger.info(f"모의투자 봇(A/B/C) 시작  {today}")
+
+    # ── AI 매크로 동적 파라미터 튜닝 ──
+    from market.data_processor import load_market_proxy
+    from ai.macro_tuner import tune_daily_parameters
+    from config import STRATEGY
+    
+    try:
+        kospi = load_market_proxy("069500", "20230101", today)
+        kosdaq = load_market_proxy("229200", "20230101", today)
+        kospi_history = kospi["close"].tail(5).tolist() if len(kospi) >= 5 else []
+        kosdaq_history = kosdaq["close"].tail(5).tolist() if len(kosdaq) >= 5 else []
+        
+        if kospi_history and kosdaq_history:
+            tuned_params = tune_daily_parameters(kospi_history, kosdaq_history)
+            if "box_vol_ratio" in tuned_params:
+                STRATEGY.box_vol_ratio = tuned_params["box_vol_ratio"]
+            if "target_rr" in tuned_params:
+                STRATEGY.target_rr = tuned_params["target_rr"]
+                
+            logger.info(f"[AI 튜닝 완료] box_vol_ratio: {STRATEGY.box_vol_ratio}, target_rr: {STRATEGY.target_rr}")
+    except Exception as e:
+        logger.error(f"AI 매크로 튜닝 실패 (기본값 사용): {e}")
 
     data_dir = str(Path(__file__).parent / "mock_data")
     portfolios = {
@@ -511,7 +574,24 @@ def run_mock_trader(client: KISClient, limit: int):
         
     logger.info("모의투자 종료. 텔레그램 성과 리포트 전송")
     send_daily_report(today, stats)
-
+    
+    # 5. AI 매매 복기 리포트 전송
+    logger.info("AI 데일리 매매 복기 리포트 생성 중...")
+    try:
+        # 코스피/코스닥 당일 변동률 (간이 계산용, 실제로는 data_processor 등에서 가져옴)
+        from market.data_processor import load_market_proxy
+        kospi = load_market_proxy("069500", "20230101", today)
+        kosdaq = load_market_proxy("229200", "20230101", today)
+        kospi_chg = ((kospi["close"].iloc[-1] / kospi["close"].iloc[-2]) - 1) * 100 if len(kospi) > 1 else 0.0
+        kosdaq_chg = ((kosdaq["close"].iloc[-1] / kosdaq["close"].iloc[-2]) - 1) * 100 if len(kosdaq) > 1 else 0.0
+        
+        # A, B, C 포트폴리오 중 하나(전체)의 히스토리 전달
+        history_csv = str(portfolios["A"].history_file) 
+        ai_report = generate_daily_report(history_csv, kospi_chg, kosdaq_chg)
+        
+        send_telegram(f"🤖 <b>[AI 데일리 매매 복기]</b>\n\n{ai_report}")
+    except Exception as e:
+        logger.error(f"AI 리포트 전송 중 오류: {e}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="원캔들 모의투자 봇 (A/B/C)")

@@ -38,11 +38,12 @@ class UniverseConfig:
     top_n_per_market: int = 100                 # 시장별 거래량 순위 상위 N개 후보
 
 
-@dataclass(frozen=True)
+@dataclass
 class StrategyConfig:
     atr_period: int = 14
     atr_ratio: float = 0.20          # 0.33 -> 0.20 (박스 크기 조건 유지)
     box_vol_ratio: float = 0.20      # 첫 15분 박스 거래량이 20일 일평균 거래량의 20% 이상 터져야 함
+    target_rr: float = 2.0           # 기본 부분 익절 손익비
     pullback_volume_ratio: float = 0.5 # 눌림목 하락 시 거래량이 절반 이하로 말라야 함
     hammer_tail_ratio: float = 0.50  # 꼬리 비율 유지
     hammer_body_ratio: float = 0.35  # 몸통 비율 유지
