@@ -123,16 +123,21 @@ def send_summary(date: str, total: int, signals: int) -> None:
     send(msg)
 
 
-def send_mock_buy(strategy_id: str, ticker: str, name: str, direction: str, price: float, qty: int, cost: float) -> None:
+def send_mock_buy(strategy_id: str, ticker: str, name: str, direction: str, price: float, qty: int, cost: float, pattern: str = "") -> None:
     emoji = "🛒"
     lines = [
         f"{emoji} <b>[전략 {strategy_id} 진입]</b>",
         f"종목: {name} ({ticker})",
         f"방향: {direction}",
+    ]
+    if pattern:
+        lines.append(f"패턴: {pattern}")
+        
+    lines.extend([
         f"단가: {price:>10,.0f}원",
         f"수량: {qty:>10,}주",
         f"총액: {cost:>10,.0f}원",
-    ]
+    ])
     msg = "\n".join(lines)
     send(msg)
 

@@ -33,7 +33,7 @@ from backtest.data_loader import load_stock_ohlcv
 from backtest.engine import _daily_to_atr_rows, _daily_to_vol_rows, BacktestParams
 from strategy.filters import check_atr_filter, check_volume_filter, check_market_direction
 from strategy.position_sizer import calc_position_size
-from strategy.pattern import detect_entry_signal as detect_strategy_A, detect_strategy_B, detect_strategy_C
+from strategy.pattern import detect_entry_signal as detect_strategy_A, detect_strategy_B, detect_strategy_C, detect_strategy_D
 
 from notify.telegram import (
     send_mock_buy,
@@ -80,11 +80,14 @@ class StockContext:
         self.name   = name
         self.atr:         float          = 0.0
         self.avg_vol:     float          = 0.0
+        self.prev_close:  float          = 0.0
+        self.kijun_sen:   float          = 0.0
         self.box:         BoxRange | None = None
         self.box_rejected: bool = False
         self.signaled_A:  bool = False
         self.signaled_B:  bool = False
         self.signaled_C:  bool = False
+        self.signaled_D:  bool = False
         # 분봉 캐시: API 중복 호출 최소화를 위한 증분 업데이트 용
         self._cached_candles: list = []   # 지금까지 수신된 모든 분봉
         self._last_candle_time: str = ""  # 마지막으로 받은 분봉 시각
@@ -96,7 +99,18 @@ def _load_daily_context(ctx: StockContext, today: str) -> bool:
     if ohlcv.empty or len(ohlcv) < PARAMS.atr_period + 2:
         return False
 
+    ctx.prev_close = float(ohlcv["close"].iloc[-1])
     n = len(ohlcv)
+    
+    # 일목균형표 기준선(26일 최고가와 최저가의 중간값) 계산
+    if n >= 26:
+        recent_26 = ohlcv.iloc[-26:]
+        highest_high = float(recent_26["high"].max())
+        lowest_low = float(recent_26["low"].min())
+        ctx.kijun_sen = (highest_high + lowest_low) / 2
+    else:
+        ctx.kijun_sen = 0.0
+        
     atr_rows = _daily_to_atr_rows(ohlcv.iloc[n - PARAMS.atr_period - 1: n])
     try:
         ctx.atr = calc_atr(atr_rows, PARAMS.atr_period)
@@ -124,6 +138,16 @@ def _setup_box(ctx: StockContext, client: KISClient) -> bool:
         return False
 
     box = candle_to_box(first15)
+    
+    from config import STRATEGY
+    
+    # ── 갭 상승 필터 (전일 종가 대비 시가 갭이 max_gap_pct 초과 시 탈락) ──
+    if ctx.prev_close > 0:
+        gap_pct = (first15.open / ctx.prev_close - 1) * 100
+        if gap_pct > STRATEGY.max_gap_pct:
+            logger.info(f"[{ctx.ticker}] 갭 상승 {gap_pct:.1f}% 초과로 박스 거부")
+            ctx.box_rejected = True
+            return False
 
     atr_r = check_atr_filter(box.size, ctx.atr, PARAMS.atr_ratio)
     if not atr_r.passed:
@@ -131,7 +155,6 @@ def _setup_box(ctx: StockContext, client: KISClient) -> bool:
         return False
 
     # ── 거래량 폭발 필터 (15분만에 일평균 거래량의 box_vol_ratio 터졌는지 확인) ──
-    from config import STRATEGY
     if ctx.avg_vol > 0 and first15.volume < ctx.avg_vol * STRATEGY.box_vol_ratio:
         ctx.box_rejected = True
         return False
@@ -172,13 +195,45 @@ def _execute_mock_buy(
         logger.info(f"[전략 {strategy_id}] {ctx.ticker} 다른 전략이 보유 중 → 진입 스킵")
         return
 
+    # ③ 주식단테 기법: 기준선 지지 부근(±3%) 타점이면 비중 2배 베팅 (Risk 1% -> 2%)
+    current_risk_pct = 0.01
+    is_kijun_bounce = False
+    if ctx.kijun_sen > 0:
+        dist_to_kijun = abs(sig.trigger_price - ctx.kijun_sen) / ctx.kijun_sen
+        if dist_to_kijun <= 0.03:
+            current_risk_pct = 0.02
+            is_kijun_bounce = True
+            logger.info(f"[{strategy_id}] {ctx.ticker} 기준선 지지 구간! 비중 2배 베팅 (Risk {current_risk_pct*100}%)")
+
+    # ④ 퀀트 기법: 시간 가치 감가상각 (Time Decay Penalty)
+    # 장 후반일수록 돌파 승률이 떨어지므로 리스크를 축소함
+    if sig.candle_time:
+        try:
+            hh, mm = int(sig.candle_time[:2]), int(sig.candle_time[2:4])
+            mins_from_open = (hh - 9) * 60 + mm
+            
+            if mins_from_open < 15:
+                decay_multiplier = 1.0
+            elif mins_from_open < 30:
+                decay_multiplier = 0.8
+            elif mins_from_open < 45:
+                decay_multiplier = 0.6
+            else:
+                decay_multiplier = 0.4
+                
+            if decay_multiplier < 1.0:
+                current_risk_pct *= decay_multiplier
+                logger.info(f"[{strategy_id}] {ctx.ticker} 시간 감가 적용: {sig.candle_time} -> 비중 {decay_multiplier*100}% 축소")
+        except:
+            pass
+
     try:
         ps = calc_position_size(
             equity=initial_balance,   # 포지션 사이징: 현금잔고 아닌 당일 시작 총 자본 기준
             entry_price=sig.trigger_price,
             stop_loss=sig.stop_loss,
             take_profit=sig.take_profit,
-            risk_pct=0.01,
+            risk_pct=current_risk_pct,
             max_invest_pct=0.20
         )
     except Exception as e:
@@ -195,6 +250,10 @@ def _execute_mock_buy(
         take_profit=sig.take_profit
     ):
         locked_tickers.add(ctx.ticker)
+        
+        # 알림용 패턴 이름 수정
+        pattern_msg = sig.pattern if not is_kijun_bounce else f"{sig.pattern} (💡기준선 지지 베팅!)"
+        
         send_mock_buy(
             strategy_id=strategy_id,
             ticker=ctx.ticker,
@@ -202,7 +261,8 @@ def _execute_mock_buy(
             direction=sig.direction.value,
             price=sig.trigger_price,
             qty=ps.shares,
-            cost=ps.invest_amount
+            cost=ps.invest_amount,
+            pattern=pattern_msg
         )
 
 def _fetch_candles_incremental(client: KISClient, ctx: StockContext) -> list:
@@ -251,11 +311,29 @@ def _check_strategies(
     if len(five_min) < 2:
         return
 
-    # 시장 방향: 호출 시점의 최신 파라미터 사용 (루프마다 갱신된 값)
-    mkt_dir = check_market_direction(mkt_kospi, mkt_kosdaq, PARAMS.market_pct)
-
     curr = five_min[-1]
     prev = five_min[-2]
+
+    # ④ 퀀트 기법: 당일 VWAP(거래량 가중 평균가) 방어선
+    # 당일 모든 분봉 기준 VWAP 계산
+    total_vol = sum(c.volume for c in all_candles)
+    if total_vol > 0:
+        vwap = sum(c.close * c.volume for c in all_candles) / total_vol
+        if curr.close < vwap:
+            # 기관의 평균단가(VWAP) 아래에서 노는 종목은 즉각 버림
+            return
+
+    # ④ 퀀트 기법: 시장 상대강도 (Index Relative Strength) 필터
+    if ctx.prev_close > 0:
+        stock_pct = (curr.close / ctx.prev_close) - 1.0
+        # 코스피/코스닥 중 더 강한 지수의 상승률 (최소 0%)
+        mkt_max_pct = max(mkt_kospi / 100.0, mkt_kosdaq / 100.0, 0.0)
+        is_stronger_than_market = stock_pct >= mkt_max_pct
+    else:
+        is_stronger_than_market = True
+
+    # 시장 방향: 호출 시점의 최신 파라미터 사용 (루프마다 갱신된 값)
+    mkt_dir = check_market_direction(mkt_kospi, mkt_kosdaq, PARAMS.market_pct)
 
     # Strategy A
     if not ctx.signaled_A:
@@ -273,10 +351,10 @@ def _check_strategies(
                 logger.info(f"[{ctx.ticker}] 전략 A 신호 포착 및 AI 승인 완료")
                 _execute_mock_buy("A", ctx, sig_a, portfolios["A"], limit_mgrs["A"], locked_tickers, initial_balances["A"])
 
-    # Strategy B
+    # Strategy B (돌파) - 지수보다 강할 때만
     if not ctx.signaled_B:
         sig_b = detect_strategy_B(curr, prev, ctx.box)
-        if sig_b and mkt_dir.allows(sig_b.direction):
+        if sig_b and mkt_dir.allows(sig_b.direction) and is_stronger_than_market:
             ctx.signaled_B = True
             
             # AI 패턴 승인 확인
@@ -289,10 +367,10 @@ def _check_strategies(
                 logger.info(f"[{ctx.ticker}] 전략 B 신호 포착 및 AI 승인 완료")
                 _execute_mock_buy("B", ctx, sig_b, portfolios["B"], limit_mgrs["B"], locked_tickers, initial_balances["B"])
 
-    # Strategy C
+    # Strategy C (눌림목) - 지수보다 강할 때만
     if not ctx.signaled_C:
         sig_c = detect_strategy_C(five_min, ctx.box)
-        if sig_c and mkt_dir.allows(sig_c.direction):
+        if sig_c and mkt_dir.allows(sig_c.direction) and is_stronger_than_market:
             ctx.signaled_C = True
             
             # AI 패턴 승인 확인
@@ -304,6 +382,23 @@ def _check_strategies(
             if approved:
                 logger.info(f"[{ctx.ticker}] 전략 C 신호 포착 및 AI 승인 완료")
                 _execute_mock_buy("C", ctx, sig_c, portfolios["C"], limit_mgrs["C"], locked_tickers, initial_balances["C"])
+
+    # Strategy D (시초가 갭 5% 미만에서 시가 돌파) - 지수보다 강할 때만
+    if not ctx.signaled_D:
+        sig_d = detect_strategy_D(monitoring) # 1분봉 원본 배열을 넘김
+        if sig_d and mkt_dir.allows(sig_d.direction) and is_stronger_than_market:
+            ctx.signaled_D = True
+            
+            # AI 패턴 승인 확인
+            approved = True
+            if ai_analyzer.is_available():
+                # 전략 D는 1분봉 시가 회복이므로 최근 1분봉 5개를 보냄
+                ohlcv_text = "\\n".join([f"Time:{c.time} O:{c.open} H:{c.high} L:{c.low} C:{c.close} Vol:{c.volume}" for c in monitoring[-5:]])
+                approved = ai_analyzer.validate_pattern_context(ctx.ticker, "D (시가 회복)", ohlcv_text)
+                
+            if approved:
+                logger.info(f"[{ctx.ticker}] 전략 D 신호 포착 및 AI 승인 완료")
+                _execute_mock_buy("D", ctx, sig_d, portfolios["D"], limit_mgrs["D"], locked_tickers, initial_balances["D"])
 
 
 def _handle_telegram_commands(portfolios: dict, limit_mgrs: dict):
@@ -434,12 +529,14 @@ def run_mock_trader(client: KISClient, limit: int):
         "A": Portfolio(strategy_id="A", data_dir=data_dir),
         "B": Portfolio(strategy_id="B", data_dir=data_dir),
         "C": Portfolio(strategy_id="C", data_dir=data_dir),
+        "D": Portfolio(strategy_id="D", data_dir=data_dir),
     }
     
     stats = {
         "A": {"balance": portfolios["A"].balance, "pnl_today": 0.0, "trades_count": 0},
         "B": {"balance": portfolios["B"].balance, "pnl_today": 0.0, "trades_count": 0},
         "C": {"balance": portfolios["C"].balance, "pnl_today": 0.0, "trades_count": 0},
+        "D": {"balance": portfolios["D"].balance, "pnl_today": 0.0, "trades_count": 0},
     }
 
     # 코스피 21 EMA 추세 확인 (하락장 리스크 관리)
@@ -456,6 +553,7 @@ def run_mock_trader(client: KISClient, limit: int):
         "A": portfolios["A"].balance * risk_multiplier,
         "B": portfolios["B"].balance * risk_multiplier,
         "C": portfolios["C"].balance * risk_multiplier,
+        "D": portfolios["D"].balance * risk_multiplier,
     }
 
     # 일일 손실 한도 매니저 (초기 잔고의 -2% 도달 시 신규 진입 차단)
@@ -463,6 +561,7 @@ def run_mock_trader(client: KISClient, limit: int):
         "A": DailyLimitManager(initial_balances["A"], max_loss_pct=0.02, strategy_id="A"),
         "B": DailyLimitManager(initial_balances["B"], max_loss_pct=0.02, strategy_id="B"),
         "C": DailyLimitManager(initial_balances["C"], max_loss_pct=0.02, strategy_id="C"),
+        "D": DailyLimitManager(initial_balances["D"], max_loss_pct=0.02, strategy_id="D"),
     }
 
 
@@ -488,6 +587,7 @@ def run_mock_trader(client: KISClient, limit: int):
         "A": PositionManager(portfolios["A"], client, on_sell_callback=make_on_sell("A")),
         "B": PositionManager(portfolios["B"], client, on_sell_callback=make_on_sell("B")),
         "C": PositionManager(portfolios["C"], client, on_sell_callback=make_on_sell("C")),
+        "D": PositionManager(portfolios["D"], client, on_sell_callback=make_on_sell("D")),
     }
 
     _wait_until(BOX_CLOSE_TIME, "첫 15분봉 마감", portfolios, limit_mgrs)

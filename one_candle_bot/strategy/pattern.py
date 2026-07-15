@@ -411,3 +411,48 @@ def detect_strategy_C(
             )
             
     return None
+
+def detect_strategy_D(one_min_candles: list[Candle]) -> EntrySignal | None:
+    """
+    전략 D (유튜브 김사부2 시가 회복 기법):
+    - 첫 1분봉 시가(오늘의 시가)를 기준으로 함.
+    - 장 시작 후 주가가 한 번이라도 시가 아래로 이탈(음봉 혹은 꼬리)했어야 함.
+    - 현재 1분봉이 시가를 다시 위로 돌파(Cross-Up)하는 순간 매수.
+    - 손절선(Stop Loss): 당일 형성된 최저가.
+    """
+    if len(one_min_candles) < 2:
+        return None
+        
+    opening_price = one_min_candles[0].open
+    
+    # 1. 시가 아래로 내려간 적이 있는지 확인 & 당일 최저가 탐색
+    lowest_price = min(c.low for c in one_min_candles)
+    has_dipped = lowest_price < opening_price
+    if not has_dipped:
+        return None
+        
+    curr = one_min_candles[-1]
+    prev = one_min_candles[-2]
+    
+    # 2. 직전 캔들의 종가는 시가 이하였고, 현재 캔들의 종가가 시가를 강하게 돌파했는지 확인
+    # (돌파하는 순간을 포착하기 위해 prev.close <= open < curr.close)
+    if prev.close <= opening_price and curr.close > opening_price:
+        # 매수 타점 포착
+        entry_price = curr.close
+        stop_loss = lowest_price
+        
+        # 만약 손절폭이 너무 크면(예: 5% 이상) 리스크 관리상 거부
+        if stop_loss > 0 and (entry_price - stop_loss) / entry_price > 0.05:
+            return None
+            
+        return EntrySignal(
+            direction=Direction.LONG,
+            pattern="D (Opening Recovery)",
+            entry_type=EntryType.IMMEDIATE,
+            trigger_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=entry_price * 1.05,  # 기본 TP는 PositionManager에서 RR 기반으로 재조정됨
+            candle_time=curr.time
+        )
+        
+    return None

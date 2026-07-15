@@ -18,7 +18,7 @@ def run_test():
     if test_dir.exists():
         shutil.rmtree(test_dir)
         
-    p = Portfolio(data_dir=str(test_dir))
+    p = Portfolio("A", data_dir=str(test_dir))
     print(f"Initial balance: {p.balance:,.0f}")
     
     # Buy 100 shares of 005930 at 80,000 (Cost: 8,000,000 + fee)

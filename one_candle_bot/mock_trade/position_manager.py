@@ -33,11 +33,24 @@ class PositionManager:
                 from config import STRATEGY
                 target_rr = getattr(STRATEGY, 'target_rr', 2.0)
                 
+                # 최고가 갱신 로직 추가
+                if current_price > pos.highest_price:
+                    pos.highest_price = current_price
+                    self.portfolio.save() # 상태 저장
+                
                 if pos.direction == 'LONG':
                     rr2_price = pos.entry_price + (pos.entry_price - pos.stop_loss) * target_rr
                     
-                    if current_price <= pos.stop_loss:
-                        reason = "손절 (Stop Loss)"
+                    # 진성 트레일링 스탑: 현재 설정된 손절폭
+                    risk_amount = pos.entry_price - pos.stop_loss
+                    dynamic_stop_loss = max(pos.stop_loss, pos.highest_price - risk_amount * 1.5) # 최고점에서 리스크의 1.5배 하락 시 컷
+                    
+                    if current_price <= dynamic_stop_loss:
+                        reason = f"트레일링 스탑 (최고가 {pos.highest_price:,.0f} 대비 하락)"
+                        if dynamic_stop_loss == pos.stop_loss:
+                            reason = "손절 (Stop Loss)"
+                        # 최종 익절과 동일하게 전량 매도
+                        
                     elif not pos.partial_sold and current_price >= rr2_price:
                         reason = f"부분 익절 (RR {target_rr} 도달)"
                         is_partial = True

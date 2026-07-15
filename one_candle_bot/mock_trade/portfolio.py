@@ -23,6 +23,7 @@ class Position:
     stop_loss: float
     take_profit: float
     entry_time: str
+    highest_price: float = 0.0
     partial_sold: bool = False
 
     def current_value(self, current_price: float) -> float:
@@ -99,7 +100,8 @@ class Portfolio:
             quantity=quantity,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            entry_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entry_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            highest_price=price
         )
         self.positions[ticker] = pos
         self.save()

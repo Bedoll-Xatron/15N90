@@ -114,6 +114,11 @@ class UniverseScreener:
                 # 2. 현재 가격이 21 EMA 위에 있어야 함
                 if current_close < ema21_current:
                     continue
+                    
+                # 3. 주식단테 기법: 주가가 5일 이동평균선(단기 생명선) 위에 있어야 함
+                ma5 = recent_df["close"].tail(5).mean()
+                if current_close < ma5:
+                    continue
                 
                 # 20일 누적 수익률 (모멘텀)
                 close_20_days_ago = float(recent_df["close"].iloc[0])
