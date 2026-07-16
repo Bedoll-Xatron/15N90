@@ -79,16 +79,12 @@ def generate_daily_report(history_csv: str, kospi_chg: float, kosdaq_chg: float)
         return "NVIDIA API KEY가 설정되지 않아 리포트를 생성할 수 없습니다.\n" + summary_text
         
     try:
-        response = analyzer.client.chat.completions.create(
-            model=analyzer.model,
-            messages=[
-                {"role": "system", "content": "You are a professional trading analyst. Be concise and insightful."},
-                {"role": "user", "content": prompt}
-            ],
+        report = analyzer._call_api_with_fallback(
+            prompt=prompt,
+            system_msg="You are a professional trading analyst. Be concise and insightful.",
             temperature=0.3,
-            max_tokens=500,
+            max_tokens=500
         )
-        report = response.choices[0].message.content.strip()
         return report
     except Exception as e:
         logger.error(f"리포트 생성 중 오류: {e}")

@@ -69,7 +69,8 @@ DEFAULT_TICKERS = {
 
 PARAMS = BacktestParams()
 BOX_CLOSE_TIME  = "091500"
-SCAN_END_TIME   = "103000"
+SCAN_END_TIME   = "145000"
+MARKET_CLOSE_TIME = "145000"
 MARKET_CLOSE_TIME = "145000"
 POLL_INTERVAL   = 60
 
@@ -330,16 +331,29 @@ def _check_strategies(
         mkt_max_pct = max(mkt_kospi / 100.0, mkt_kosdaq / 100.0, 0.0)
         is_stronger_than_market = stock_pct >= mkt_max_pct
     else:
+        stock_pct = 0.0
         is_stronger_than_market = True
 
     # 시장 방향: 호출 시점의 최신 파라미터 사용 (루프마다 갱신된 값)
     mkt_dir = check_market_direction(mkt_kospi, mkt_kosdaq, PARAMS.market_pct)
 
-    # Strategy A
-    if not ctx.signaled_A:
+    # ── 폭락장 주도주 예외 허용 (Crash Alpha) ──
+    from config import STRATEGY
+    is_crash_market = not mkt_dir.long_allowed
+    crash_alpha_passed = False
+    if is_crash_market and (stock_pct * 100) >= STRATEGY.crash_alpha_min_pct:
+        crash_alpha_passed = True
+
+    # Strategy A (휩소 - 오전장 10:30까지만 유효)
+    from datetime import datetime
+    now_str = datetime.now().strftime("%H%M%S")
+    if not ctx.signaled_A and now_str <= "103000":
         sig_a = detect_strategy_A(curr, prev, ctx.box)
-        if sig_a and mkt_dir.allows(sig_a.direction):
+        if sig_a and (mkt_dir.allows(sig_a.direction) or (sig_a.direction.value == 'LONG' and crash_alpha_passed)):
             ctx.signaled_A = True
+            
+            if crash_alpha_passed and not mkt_dir.allows(sig_a.direction):
+                logger.info(f"[{ctx.ticker}] 폭락장 속 주도주 포착 (Crash Alpha 발동!)")
             
             # AI 패턴 승인 확인
             approved = True
@@ -354,8 +368,11 @@ def _check_strategies(
     # Strategy B (돌파) - 지수보다 강할 때만
     if not ctx.signaled_B:
         sig_b = detect_strategy_B(curr, prev, ctx.box)
-        if sig_b and mkt_dir.allows(sig_b.direction) and is_stronger_than_market:
+        if sig_b and (mkt_dir.allows(sig_b.direction) or (sig_b.direction.value == 'LONG' and crash_alpha_passed)) and is_stronger_than_market:
             ctx.signaled_B = True
+            
+            if crash_alpha_passed and not mkt_dir.allows(sig_b.direction):
+                logger.info(f"[{ctx.ticker}] 폭락장 속 주도주 포착 (Crash Alpha 발동!)")
             
             # AI 패턴 승인 확인
             approved = True
@@ -370,8 +387,11 @@ def _check_strategies(
     # Strategy C (눌림목) - 지수보다 강할 때만
     if not ctx.signaled_C:
         sig_c = detect_strategy_C(five_min, ctx.box)
-        if sig_c and mkt_dir.allows(sig_c.direction) and is_stronger_than_market:
+        if sig_c and (mkt_dir.allows(sig_c.direction) or (sig_c.direction.value == 'LONG' and crash_alpha_passed)) and is_stronger_than_market:
             ctx.signaled_C = True
+            
+            if crash_alpha_passed and not mkt_dir.allows(sig_c.direction):
+                logger.info(f"[{ctx.ticker}] 폭락장 속 주도주 포착 (Crash Alpha 발동!)")
             
             # AI 패턴 승인 확인
             approved = True
@@ -386,8 +406,11 @@ def _check_strategies(
     # Strategy D (시초가 갭 5% 미만에서 시가 돌파) - 지수보다 강할 때만
     if not ctx.signaled_D:
         sig_d = detect_strategy_D(monitoring) # 1분봉 원본 배열을 넘김
-        if sig_d and mkt_dir.allows(sig_d.direction) and is_stronger_than_market:
+        if sig_d and (mkt_dir.allows(sig_d.direction) or (sig_d.direction.value == 'LONG' and crash_alpha_passed)) and is_stronger_than_market:
             ctx.signaled_D = True
+            
+            if crash_alpha_passed and not mkt_dir.allows(sig_d.direction):
+                logger.info(f"[{ctx.ticker}] 폭락장 속 주도주 포착 (Crash Alpha 발동!)")
             
             # AI 패턴 승인 확인
             approved = True
@@ -503,13 +526,12 @@ def run_mock_trader(client: KISClient, limit: int):
     logger.info(f"모의투자 봇(A/B/C) 시작  {today}")
 
     # ── AI 매크로 동적 파라미터 튜닝 ──
-    from market.data_processor import load_market_proxy
     from ai.macro_tuner import tune_daily_parameters
     from config import STRATEGY
     
     try:
-        kospi = load_market_proxy("069500", "20230101", today)
-        kosdaq = load_market_proxy("229200", "20230101", today)
+        kospi = load_stock_ohlcv("069500", "20230101", today)
+        kosdaq = load_stock_ohlcv("229200", "20230101", today)
         kospi_history = kospi["close"].tail(5).tolist() if len(kospi) >= 5 else []
         kosdaq_history = kosdaq["close"].tail(5).tolist() if len(kosdaq) >= 5 else []
         
@@ -645,9 +667,9 @@ def run_mock_trader(client: KISClient, limit: int):
             
         time.sleep(POLL_INTERVAL)
 
-    logger.info("10:30 — 신규 진입 마감")
+    logger.info("14:50 — 신규 진입 마감")
 
-    # 2. 10:30 ~ 14:50 (포지션 청산만 감시)
+    # 2. 신규 진입 조기 마감 시, 14:50까지 기존 포지션 청산만 감시
     while _now_str() <= MARKET_CLOSE_TIME:
         _handle_telegram_commands(portfolios, limit_mgrs)
         
@@ -679,9 +701,8 @@ def run_mock_trader(client: KISClient, limit: int):
     logger.info("AI 데일리 매매 복기 리포트 생성 중...")
     try:
         # 코스피/코스닥 당일 변동률 (간이 계산용, 실제로는 data_processor 등에서 가져옴)
-        from market.data_processor import load_market_proxy
-        kospi = load_market_proxy("069500", "20230101", today)
-        kosdaq = load_market_proxy("229200", "20230101", today)
+        kospi = load_stock_ohlcv("069500", "20230101", today)
+        kosdaq = load_stock_ohlcv("229200", "20230101", today)
         kospi_chg = ((kospi["close"].iloc[-1] / kospi["close"].iloc[-2]) - 1) * 100 if len(kospi) > 1 else 0.0
         kosdaq_chg = ((kosdaq["close"].iloc[-1] / kosdaq["close"].iloc[-2]) - 1) * 100 if len(kosdaq) > 1 else 0.0
         

@@ -9,7 +9,13 @@ logger = logging.getLogger(__name__)
 class NIMAnalyzer:
     def __init__(self):
         api_key = os.getenv("NVIDIA_API_KEY")
-        self.model = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
+        
+        # 2가지 모델을 리스트로 관리하여 에러 시 수시로 교체
+        self.models = [
+            os.getenv("NVIDIA_MODEL", "nvidia/nemotron-4-340b-instruct"),
+            "meta/llama-3.1-405b-instruct"
+        ]
+        self.current_model_idx = 0
         
         if not api_key:
             logger.warning("NVIDIA_API_KEY가 설정되지 않아 AI 기능을 사용할 수 없습니다.")
@@ -17,11 +23,35 @@ class NIMAnalyzer:
         else:
             self.client = OpenAI(
                 base_url="https://integrate.api.nvidia.com/v1",
-                api_key=api_key
+                api_key=api_key,
+                timeout=10.0
             )
 
     def is_available(self) -> bool:
         return self.client is not None
+
+    def _call_api_with_fallback(self, prompt: str, system_msg: str, temperature: float = 0.0, max_tokens: int = 150) -> str:
+        last_error = None
+        for _ in range(len(self.models)):
+            current_model = self.models[self.current_model_idx]
+            try:
+                response = self.client.chat.completions.create(
+                    model=current_model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.warning(f"AI 모델({current_model}) 호출 에러: {e}. 다음 모델로 대체합니다.")
+                last_error = e
+                # 에러 발생 시 다음 모델로 스위치 (nemotron <-> llama)
+                self.current_model_idx = (self.current_model_idx + 1) % len(self.models)
+                
+        raise Exception(f"모든 AI 모델 호출에 실패했습니다. 마지막 에러: {last_error}")
 
     def analyze_news_catalyst(self, ticker: str, name: str, headlines: list[str]) -> bool:
         """
@@ -49,17 +79,8 @@ class NIMAnalyzer:
 }}
 """
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI JSON output generator."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                max_tokens=150,
-            )
+            content = self._call_api_with_fallback(prompt, "You are a helpful AI JSON output generator.")
             
-            content = response.choices[0].message.content.strip()
             # 마크다운 코드 블록 제거
             if content.startswith("```json"):
                 content = content[7:-3].strip()
@@ -110,17 +131,8 @@ class NIMAnalyzer:
 }}
 """
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a precise trading pattern validator."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                max_tokens=150,
-            )
+            content = self._call_api_with_fallback(prompt, "You are a precise trading pattern validator.")
             
-            content = response.choices[0].message.content.strip()
             if content.startswith("```json"): content = content[7:-3].strip()
             elif content.startswith("```"): content = content[3:-3].strip()
                 

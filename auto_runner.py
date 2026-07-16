@@ -18,7 +18,8 @@ def run_trader():
         # mock_trader.py 실행 (하위 프로세스로 실행하여 끝날 때까지 대기)
         # mock_trader.py 내부 로직상 15:30에 장 마감 리포트 전송 후 스스로 종료됨
         process = subprocess.run(
-            ["python", "-m", "one_candle_bot.mock_trader"], 
+            ["python", "mock_trader.py"], 
+            cwd="one_candle_bot",
             check=True,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
@@ -43,9 +44,13 @@ def main():
                 run_trader()
                 
                 # mock_trader.py가 15:30에 종료된 후 여기로 돌아옴.
-                # 다음 날짜까지 중복 실행되지 않도록 넉넉히 대기 (예: 다음날 아침까지)
+                # 다음 날짜까지 중복 실행되지 않도록 넉넉히 대기 (예: 다음날 아침 8시까지)
                 logger.info("오늘의 매매가 끝났습니다. 내일 아침 8시까지 휴식합니다.")
-                while datetime.now().strftime("%H%M") > "1500" or datetime.now().strftime("%H%M") < "0800":
+                while True:
+                    current_str = datetime.now().strftime("%H%M")
+                    # 아침 8시 ~ 8시 40분 사이가 되면 다음 날 장 준비를 위해 휴식 루프 탈출
+                    if "0800" <= current_str < "0840":
+                        break
                     time.sleep(600)  # 10분 단위로 휴식
                     
         # 장 시간이 아니거나 주말이면 1분 단위로 시간 체크

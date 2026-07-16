@@ -49,6 +49,7 @@ class StrategyConfig:
     hammer_tail_ratio: float = 0.50  # 꼬리 비율 유지
     hammer_body_ratio: float = 0.35  # 몸통 비율 유지
     market_filter_pct: float = 1.5   # 코스피/코스닥 방향성 제한 유지
+    crash_alpha_min_pct: float = 3.0 # 폭락장(-1.5% 이하) 예외 매수 허용 최소 상승률 (기본 3%)
 
 
 UNIVERSE = UniverseConfig()

@@ -35,17 +35,12 @@ def tune_daily_parameters(kospi_history: list[float], kosdaq_history: list[float
 }}
 """
     try:
-        response = analyzer.client.chat.completions.create(
-            model=analyzer.model,
-            messages=[
-                {"role": "system", "content": "You are a quant risk manager. Always reply with strict JSON."},
-                {"role": "user", "content": prompt}
-            ],
+        content = analyzer._call_api_with_fallback(
+            prompt=prompt,
+            system_msg="You are a quant risk manager. Always reply with strict JSON.",
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=150
         )
-        
-        content = response.choices[0].message.content.strip()
         if content.startswith("```json"): content = content[7:-3].strip()
         elif content.startswith("```"): content = content[3:-3].strip()
             
