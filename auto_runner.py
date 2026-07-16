@@ -16,11 +16,13 @@ def run_trader():
     
     try:
         # mock_trader.py 실행 (하위 프로세스로 실행하여 끝날 때까지 대기)
-        # mock_trader.py 내부 로직상 15:30에 장 마감 리포트 전송 후 스스로 종료됨
+        import sys
         process = subprocess.run(
             ["python", "mock_trader.py"], 
             cwd="one_candle_bot",
             check=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         logger.info("오늘의 자동매매(mock_trader.py) 세션이 정상적으로 종료되었습니다.")
