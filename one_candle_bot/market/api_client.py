@@ -168,13 +168,14 @@ class KISClient:
 
     def get_volume_ranking(self, market: str = "J", top_n: int = 100) -> list[dict]:
         """거래량 순위 (J: KOSPI, Q: KOSDAQ)"""
+        iscd = "0001" if market == "J" else "1001"
         data = self._get(
-            "/uapi/domestic-stock/v1/ranking/volume",
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
             tr_id="FHPST01710000",
             params={
-                "FID_COND_MRKT_DIV_CODE": market,
+                "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_COND_SCR_DIV_CODE": "20171",
-                "FID_INPUT_ISCD": "0000",
+                "FID_INPUT_ISCD": iscd,
                 "FID_DIV_CLS_CODE": "0",
                 "FID_BLNG_CLS_CODE": "0",
                 "FID_TRGT_CLS_CODE": "111111111",

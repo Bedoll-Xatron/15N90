@@ -73,24 +73,63 @@ def _get_recent_trading_day() -> str:
     return get_calendar().last_trading_day().strftime("%Y%m%d")
 
 class UniverseScreener:
-    """종목 스크리너 (pykrx 기반, KIS API 불필요)"""
+    """종목 스크리너 (pykrx 기반, KIS API Fallback 지원)"""
 
-    def screen(self, limit: int = 8, client=None) -> Dict[str, str]:
-        """
-        당일 감시 종목 반환 — {종목코드: 종목명}
-        최근 20일 모멘텀 기준 상위 종목 추천 (MA20 이상 우상향 한정)
-        client가 제공되면 당일 아침 실시간 등락률을 반영하여 최종 정렬합니다.
-        """
-        base = MAJOR_TICKERS
-        today_str  = _get_recent_trading_day()
-        # 데이터 캐싱을 활용하므로 안전하게 넉넉히 가져옴
-        start_str  = "20230101"
+    def _fetch_candidates_pykrx(self) -> Dict[str, str]:
+        """Option 3: 시가총액 1,000억~1조원 필터링 후 거래대금 상위 추출"""
+        from pykrx import stock as krx
+        import pandas as pd
+        from datetime import timedelta
+        
+        cal = get_calendar()
+        today = cal.last_trading_day()
+        yesterday = today - timedelta(days=1)
+        while not cal.is_trading_day(yesterday):
+            yesterday -= timedelta(days=1)
+        yesterday_str = yesterday.strftime("%Y%m%d")
+        
+        df_kq = krx.get_market_cap(yesterday_str, market="KOSDAQ")
+        df_kp = krx.get_market_cap(yesterday_str, market="KOSPI")
+        df = pd.concat([df_kq, df_kp])
+        
+        cond1 = df['시가총액'] >= 100_000_000_000
+        cond2 = df['시가총액'] <= 1_000_000_000_000
+        cond3 = df['거래대금'] >= 30_000_000_000
+        
+        filtered = df[cond1 & cond2 & cond3]
+        filtered = filtered.sort_values(by='거래대금', ascending=False)
+        
+        candidates = {}
+        for ticker in filtered.index:
+            candidates[ticker] = krx.get_market_ticker_name(ticker)
+            if len(candidates) >= 100:
+                break
+        
+        if not candidates:
+            raise ValueError("Pykrx 조회 결과 없음")
+        return candidates
 
-        logger.info(f"[Universe] 스크리닝 시작 ({today_str}) 후보 {len(base)}종목")
+    def _fetch_candidates_kis(self, client) -> Dict[str, str]:
+        """Option 2: KIS API 거래량 상위 연동"""
+        if not client:
+            raise ValueError("KIS Client가 제공되지 않았습니다.")
+            
+        candidates = {}
+        kq_ranking = client.get_volume_ranking("Q", 50)
+        kp_ranking = client.get_volume_ranking("J", 50)
+        
+        for item in kq_ranking + kp_ranking:
+            code = item.get("mksc_shrn_iscd")
+            name = item.get("hts_kor_isnm")
+            if code and name:
+                candidates[code] = name
+        return candidates
 
-        scored: list[tuple[str, str, float, float]] = []  # (code, name, momentum, trade_amt)
-
-        for code, name in base.items():
+    def _evaluate_base(self, base_dict: Dict[str, str], start_str: str, today_str: str) -> tuple[list, list]:
+        """주어진 종목풀에 대해 필터링을 수행하고 (scored, fallback_scored) 반환"""
+        scored = []
+        fallback_scored = []
+        for code, name in base_dict.items():
             try:
                 df = load_stock_ohlcv(code, start_str, today_str)
                 if df.empty or len(df) < 22:
@@ -106,19 +145,7 @@ class UniverseScreener:
                 ema21_current = float(recent_df["ema21"].iloc[-1])
                 ema21_prev = float(recent_df["ema21"].iloc[-2])
                 
-                # [크랙 트레이더의 21 EMA 필터 적용]
-                # 1. 21 EMA가 상승 중이어야 함 (V자의 우측)
-                if ema21_current <= ema21_prev:
-                    continue
-                    
-                # 2. 현재 가격이 21 EMA 위에 있어야 함
-                if current_close < ema21_current:
-                    continue
-                    
-                # 3. 주식단테 기법: 주가가 5일 이동평균선(단기 생명선) 위에 있어야 함
                 ma5 = recent_df["close"].tail(5).mean()
-                if current_close < ma5:
-                    continue
                 
                 # 20일 누적 수익률 (모멘텀)
                 close_20_days_ago = float(recent_df["close"].iloc[0])
@@ -127,7 +154,6 @@ class UniverseScreener:
                 else:
                     momentum = 0.0
                     
-                # 상승세(모멘텀 > 0)가 아니면 탈락
                 # 최근 거래대금 계산
                 last = recent_df.iloc[-1]
                 vol = float(last.get("volume", 0))
@@ -149,11 +175,66 @@ class UniverseScreener:
                 if trade_amt_est < 10_000_000_000:
                     continue
                     
+                fallback_scored.append((code, name, momentum, trade_amt_est))
+                
+                # [크랙 트레이더의 21 EMA 필터 적용]
+                # 1. 21 EMA가 상승 중이어야 함 (V자의 우측)
+                if ema21_current <= ema21_prev:
+                    continue
+                    
+                # 2. 현재 가격이 21 EMA 위에 있어야 함
+                if current_close < ema21_current:
+                    continue
+                    
+                # 3. 주식단테 기법: 주가가 5일 이동평균선(단기 생명선) 위에 있어야 함
+                if current_close < ma5:
+                    continue
+                    
                 scored.append((code, name, momentum, trade_amt_est))
 
             except Exception as e:
                 logger.debug(f"[Universe] {code} 조회 실패: {e}")
                 continue
+                
+        return scored, fallback_scored
+
+    def screen(self, limit: int = 8, client=None) -> Dict[str, str]:
+        """
+        당일 감시 종목 반환 — {종목코드: 종목명}
+        최근 20일 모멘텀 기준 상위 종목 추천 (MA20 이상 우상향 한정)
+        client가 제공되면 당일 아침 실시간 등락률을 반영하여 최종 정렬합니다.
+        """
+        today_str  = _get_recent_trading_day()
+        # 데이터 캐싱을 활용하므로 안전하게 넉넉히 가져옴
+        start_str  = "20230101"
+
+        logger.info(f"[Universe] 1차 스크리닝 시작 (대형주 {len(MAJOR_TICKERS)}종목)")
+        scored, fallback_scored = self._evaluate_base(MAJOR_TICKERS, start_str, today_str)
+
+        # 1차 대형주 검사 결과가 부족하면 2차 동적 발굴 시도
+        if len(scored) < limit:
+            logger.info(f"[Universe] 대형주 결과 부족({len(scored)}/{limit}). 동적 발굴을 추가합니다.")
+            dynamic_base = {}
+            try:
+                dynamic_base = self._fetch_candidates_pykrx()
+            except Exception as e:
+                try:
+                    dynamic_base = self._fetch_candidates_kis(client)
+                except Exception as e2:
+                    logger.warning(f"[Universe] 동적 발굴 실패: {e2}")
+                    
+            if dynamic_base:
+                # 대형주 풀과 겹치지 않는 종목만 추출
+                dynamic_base = {k: v for k, v in dynamic_base.items() if k not in MAJOR_TICKERS}
+                logger.info(f"[Universe] 2차 스크리닝 시작 (동적 중소형주 {len(dynamic_base)}종목)")
+                dyn_scored, dyn_fallback = self._evaluate_base(dynamic_base, start_str, today_str)
+                
+                scored.extend(dyn_scored)
+                fallback_scored.extend(dyn_fallback)
+
+        if not scored and fallback_scored:
+            logger.warning("[Universe] 우상향 종목이 없어, 데이터 수집을 위해 거래대금이 터진 종목으로 대체합니다.")
+            scored = fallback_scored
 
         # 모멘텀 내림차순 정렬 후 limit 적용
         if client is not None:

@@ -152,13 +152,15 @@ def _setup_box(ctx: StockContext, client: KISClient) -> bool:
 
     atr_r = check_atr_filter(box.size, ctx.atr, PARAMS.atr_ratio)
     if not atr_r.passed:
+        logger.info(f"[{ctx.ticker}] ATR 필터 미달로 박스 거부 (box_size: {box.size}, atr: {ctx.atr:.2f})")
         ctx.box_rejected = True
         return False
 
     # ── 거래량 폭발 필터 (15분만에 일평균 거래량의 box_vol_ratio 터졌는지 확인) ──
     if ctx.avg_vol > 0 and first15.volume < ctx.avg_vol * STRATEGY.box_vol_ratio:
-        ctx.box_rejected = True
-        return False
+        logger.warning(f"[{ctx.ticker}] 거래량 폭발 미달 (현재: {first15.volume}, 필요: {ctx.avg_vol * STRATEGY.box_vol_ratio:.1f}). 데이터 수집을 위해 예외적으로 박스를 승인합니다.")
+        # 원래는 ctx.box_rejected = True 였으나, 모의투자 데이터 수집이 아예 안되는 현상을 막기 위해 임시 패스
+        # return False
         
     # ── AI 뉴스 검증 (악재 필터링) ──
     if ai_analyzer.is_available():
