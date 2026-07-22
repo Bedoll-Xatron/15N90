@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_CACHE_FILE = Path(__file__).parent.parent / ".token_cache.json"
 REQUEST_TIMEOUT = 10
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 
 class KISAPIError(Exception):
@@ -113,7 +113,11 @@ class KISClient:
                     params=params,
                     timeout=REQUEST_TIMEOUT,
                 )
-                resp.raise_for_status()
+                # resp.raise_for_status()
+                if resp.status_code != 200:
+                    logger.error(f"HTTP {resp.status_code}: {resp.text}")
+                    if resp.status_code >= 400:
+                        raise KISAPIError(f"HTTP {resp.status_code} Error")
                 data = resp.json()
                 if data.get("rt_cd") != "0":
                     raise KISAPIError(f"[{data.get('msg_cd')}] {data.get('msg1', '오류')}")

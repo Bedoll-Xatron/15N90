@@ -7,6 +7,5 @@ logging.basicConfig(level=logging.INFO)
 cfg = load_kis_config()
 client = KISClient(cfg)
 
-ranking = client.get_volume_ranking("Q", 2)
-print("Keys:", ranking[0].keys() if ranking else "No data")
-print("First item:", ranking[0] if ranking else "No data")
+ranking = client.get_minute_ohlcv("475150", "091720")
+print("Minute OHLCV:", ranking[:2] if ranking else "No data")

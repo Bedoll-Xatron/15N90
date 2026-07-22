@@ -42,3 +42,4 @@ logs/
 .vscode/
 *.swp
 .cache/
+.token_cache.json
